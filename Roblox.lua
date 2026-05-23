@@ -1,5 +1,5 @@
 -- TP Lock Script (Global Vector Position + Rotation Alignment Patch)
--- Features: Safe Zone System, Noclip, Keybind Manager Tab, and Fixed CFrame Matrix
+-- Features: Safe Zone System, Noclip, Priority Tab, Keybinds, Instant Switching, and Dummy Blacklist
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -10,16 +10,26 @@ local player = Players.LocalPlayer
 getgenv().TPToLowHP = true
 
 local LOCK_DELAY = 0.015
-local MAX_HP_THRESHOLD = 150e18
-local FARM_DISTANCE = -40 -- Default positioning value
+local MAX_HP_THRESHOLD = 1e15
+local FARM_DISTANCE = 4 -- Default positioning value
+
+-- Proximity / Camping System Variables
+local bossCampPosition = nil
+local CAMP_RADIUS = 150 -- How far away from the boss spawn you can wander to farm regular mobs
 
 local currentTarget = nil
 local scriptRunning = true
+
+-- Modes
 local autoFarmMode = false
-local priorityHighToLow = true -- false = Low→High, true = High→Low
+local hybridMode = false
+local priorityHighToLow = false -- false = Low→High, true = High→Low
 
 local selectedEnemies = {}
 local dropdownMap = {}
+
+-- UI Lock to prevent toggle loops
+local changingToggles = false 
 
 --------------------------------------------------
 -- Safe Zone System
@@ -42,19 +52,17 @@ local function getOrCreateSafeZone()
     return safeZonePart
 end
 
--- Initialize Safe Zone on load
 getOrCreateSafeZone()
 
 --------------------------------------------------
 -- Noclip Variables
 --------------------------------------------------
-local noclipEnabled = true
+local noclipEnabled = false
 local noclipConnection = nil
 
 --------------------------------------------------
 -- Number Formatting
 --------------------------------------------------
-
 local abbreviations = {
     {1e63, "VG"}, {1e60, "NvD"}, {1e57, "OcD"}, {1e54, "SpD"},
     {1e51, "SxD"}, {1e48, "QiD"}, {1e45, "QaD"}, {1e42, "TD"},
@@ -64,23 +72,18 @@ local abbreviations = {
 }
 
 local function formatNumber(num)
-    if num < 1000 then
-        return tostring(math.floor(num))
-    end
-
+    if num < 1000 then return tostring(math.floor(num)) end
     for _, data in ipairs(abbreviations) do
         local threshold, suffix = data[1], data[2]
         if num >= threshold then
             return string.format("%.2f%s", num / threshold, suffix)
         end
     end
-
     return tostring(math.floor(num))
 end
 
 local function parseNumber(str)
     str = string.upper(string.gsub(str, "%s+", ""))
-
     for _, data in ipairs(abbreviations) do
         local threshold, suffix = data[1], data[2]
         if string.find(str, suffix .. "$") then
@@ -89,49 +92,53 @@ local function parseNumber(str)
             if num then return num * threshold end
         end
     end
-
     return tonumber(str)
 end
 
 --------------------------------------------------
--- UI Initialization (Rayfield Auto-Save Active)
+-- UI Initialization
 --------------------------------------------------
-
 local Rayfield = loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
 
 local Window = Rayfield:CreateWindow({
     Name = "TP Lock Script",
     LoadingTitle = "Lock-on System",
-    LoadingSubtitle = "Optimized Edition",
-    ConfigurationSaving = {
-        Enabled = true,
-        FolderName = "TPLockConfig",
-        FileName = "Settings"
-    },
+    LoadingSubtitle = "Proximity Respawn Edition",
+    ConfigurationSaving = { Enabled = true, FolderName = "TPLockConfig", FileName = "Settings" },
     KeySystem = false
 })
 
 local MainTab = Window:CreateTab("Auto Farm All", 4483362458)
 local AutoFarmTab = Window:CreateTab("Auto Farm Selected", 4483362458)
+local PriorityTab = Window:CreateTab("Priority Logic", 4483362458)
 local SettingsTab = Window:CreateTab("Settings", 4483362458)
 local KeybindsTab = Window:CreateTab("Keybinds", 4483362458) 
+
+-- Forward Declarations for Toggles
+local TPToggle, AutoFarmToggle, HybridToggle
 
 --------------------------------------------------
 -- Main Tab Components
 --------------------------------------------------
-
 local StatusLabel = MainTab:CreateLabel("Status: ENABLED")
 local TargetLabel = MainTab:CreateLabel("Current Target: None")
 local PriorityLabel = MainTab:CreateLabel("Priority: Low HP → High HP")
 
-local TPToggle = MainTab:CreateToggle({
+TPToggle = MainTab:CreateToggle({
     Name = "Enable TP Lock",
     CurrentValue = true,
     Flag = "TPLockEnabled",
     Callback = function(Value)
+        if changingToggles then return end
         getgenv().TPToLowHP = Value
         if Value then
+            changingToggles = true
+            if AutoFarmToggle then AutoFarmToggle:Set(false) end
+            if HybridToggle then HybridToggle:Set(false) end
+            changingToggles = false
+            
             autoFarmMode = false
+            hybridMode = false
         else
             currentTarget = nil
         end
@@ -140,7 +147,7 @@ local TPToggle = MainTab:CreateToggle({
 })
 
 local PriorityToggle = MainTab:CreateToggle({
-    Name = "Priority: High HP First",
+    Name = "Target Sorting: High HP First",
     CurrentValue = false,
     Flag = "PriorityHighHP",
     Callback = function(Value)
@@ -157,15 +164,12 @@ MainTab:CreateSlider({
     CurrentValue = LOCK_DELAY,
     Suffix = "s",
     Flag = "LockDelayValue",
-    Callback = function(Value)
-        LOCK_DELAY = Value
-    end
+    Callback = function(Value) LOCK_DELAY = Value end
 })
 
 local ThresholdLabel = MainTab:CreateLabel("Current Threshold: " .. formatNumber(MAX_HP_THRESHOLD))
-
 MainTab:CreateInput({
-    Name = "Max HP Threshold",
+    Name = "Max HP Threshold (For Non-Selected)",
     PlaceholderText = "1QA / 500T / 5B",
     Flag = "HPThresholdValue",
     Callback = function(Text)
@@ -180,7 +184,6 @@ MainTab:CreateInput({
 --------------------------------------------------
 -- Auto Farm Tab Components
 --------------------------------------------------
-
 local AutoFarmStatusLabel = AutoFarmTab:CreateLabel("Auto Farm: DISABLED")
 local SelectedCountLabel = AutoFarmTab:CreateLabel("Selected Enemies: 0")
 
@@ -194,22 +197,27 @@ local EnemyDropdown = AutoFarmTab:CreateDropdown({
         selectedEnemies = {}
         for _, displayName in ipairs(Options) do
             local realName = dropdownMap[displayName]
-            if realName then
-                selectedEnemies[realName] = true
-            end
+            if realName then selectedEnemies[realName] = true end
         end
         SelectedCountLabel:Set("Selected Enemies: " .. tostring(#Options))
     end
 })
 
-local AutoFarmToggle = AutoFarmTab:CreateToggle({
-    Name = "Enable Auto Farm",
+AutoFarmToggle = AutoFarmTab:CreateToggle({
+    Name = "Enable Auto Farm (Selected ONLY)",
     CurrentValue = false,
     Flag = "AutoFarmEnabled",
     Callback = function(Value)
+        if changingToggles then return end
         autoFarmMode = Value
         if Value then
+            changingToggles = true
+            if TPToggle then TPToggle:Set(false) end
+            if HybridToggle then HybridToggle:Set(false) end
+            changingToggles = false
+            
             getgenv().TPToLowHP = false
+            hybridMode = false
         else
             currentTarget = nil
         end
@@ -232,10 +240,7 @@ AutoFarmTab:CreateButton({
         end
 
         local sorted = {}
-        for name, hp in pairs(uniqueEnemies) do
-            table.insert(sorted, {name = name, hp = hp})
-        end
-
+        for name, hp in pairs(uniqueEnemies) do table.insert(sorted, {name = name, hp = hp}) end
         table.sort(sorted, function(a, b) return a.hp < b.hp end)
 
         for _, enemy in ipairs(sorted) do
@@ -243,7 +248,6 @@ AutoFarmTab:CreateButton({
             table.insert(options, display)
             dropdownMap[display] = enemy.name
         end
-
         EnemyDropdown:Refresh(options)
     end
 })
@@ -259,9 +263,68 @@ AutoFarmTab:CreateButton({
 })
 
 --------------------------------------------------
+-- Priority Logic Tab Components
+--------------------------------------------------
+local HybridStatusLabel = PriorityTab:CreateLabel("Hybrid Status: DISABLED")
+PriorityTab:CreateLabel("Restricted Mode: Will only farm regular mobs near the boss spawn.")
+
+HybridToggle = PriorityTab:CreateToggle({
+    Name = "Enable Hybrid Priority Mode",
+    CurrentValue = false,
+    Flag = "HybridModeEnabled",
+    Callback = function(Value)
+        if changingToggles then return end
+        hybridMode = Value
+        if Value then
+            changingToggles = true
+            if TPToggle then TPToggle:Set(false) end
+            if AutoFarmToggle then AutoFarmToggle:Set(false) end
+            changingToggles = false
+            
+            getgenv().TPToLowHP = false
+            autoFarmMode = false
+        else
+            currentTarget = nil
+        end
+        HybridStatusLabel:Set("Hybrid Status: " .. (Value and "ACTIVE" or "DISABLED"))
+    end
+})
+
+PriorityTab:CreateButton({
+    Name = "Set Current Position as Boss Camp",
+    Callback = function()
+        local character = player.Character
+        local root = character and character:FindFirstChild("HumanoidRootPart")
+        if root then
+            bossCampPosition = root.Position
+            Rayfield:Notify({
+                Title = "Camp Initialized",
+                Content = "Locked tracking onto your current area. Character will now stay here to trigger respawns!",
+                Duration = 4
+            })
+        else
+            Rayfield:Notify({
+                Title = "Error",
+                Content = "Character RootPart not found.",
+                Duration = 3
+            })
+        end
+    end
+})
+
+PriorityTab:CreateSlider({
+    Name = "Allowed Farm Distance from Camp",
+    Range = {50, 500},
+    Increment = 10,
+    CurrentValue = CAMP_RADIUS,
+    Suffix = " studs",
+    Flag = "CampRadiusSlider",
+    Callback = function(Value) CAMP_RADIUS = Value end
+})
+
+--------------------------------------------------
 -- Settings Configuration
 --------------------------------------------------
-
 SettingsTab:CreateSlider({
     Name = "Target Distance Offset (Y-Axis)",
     Range = {-50, 50},
@@ -269,9 +332,7 @@ SettingsTab:CreateSlider({
     CurrentValue = FARM_DISTANCE,
     Suffix = " studs",
     Flag = "FarmDistanceOffset",
-    Callback = function(Value)
-        FARM_DISTANCE = Value
-    end
+    Callback = function(Value) FARM_DISTANCE = Value end
 })
 
 local NoclipToggle = SettingsTab:CreateToggle({
@@ -305,10 +366,10 @@ SettingsTab:CreateButton({
         scriptRunning = false
         currentTarget = nil
         autoFarmMode = false
+        hybridMode = false
         getgenv().TPToLowHP = false
-        setCharacterHidden(false)
         if noclipConnection then noclipConnection:Disconnect() end
-        if safeZonePart then safeZonePart:Destroy() end -- Destroy Safe Zone
+        if safeZonePart then safeZonePart:Destroy() end
         Rayfield:Destroy()
     end
 })
@@ -316,15 +377,12 @@ SettingsTab:CreateButton({
 --------------------------------------------------
 -- Keybinds Configuration Tab
 --------------------------------------------------
-
 KeybindsTab:CreateKeybind({
     Name = "Toggle TP Lock (Farm All)",
     CurrentKeybind = "B",
     HoldToInteract = false,
     Flag = "KB_TPLock",
-    Callback = function()
-        TPToggle:Set(not getgenv().TPToLowHP)
-    end
+    Callback = function() TPToggle:Set(not getgenv().TPToLowHP) end
 })
 
 KeybindsTab:CreateKeybind({
@@ -332,19 +390,15 @@ KeybindsTab:CreateKeybind({
     CurrentKeybind = "V",
     HoldToInteract = false,
     Flag = "KB_AutoFarm",
-    Callback = function()
-        AutoFarmToggle:Set(not autoFarmMode)
-    end
+    Callback = function() AutoFarmToggle:Set(not autoFarmMode) end
 })
 
 KeybindsTab:CreateKeybind({
-    Name = "Toggle Target Priority",
-    CurrentKeybind = "H",
+    Name = "Toggle Hybrid Mode",
+    CurrentKeybind = "C",
     HoldToInteract = false,
-    Flag = "KB_Priority",
-    Callback = function()
-        PriorityToggle:Set(not priorityHighToLow)
-    end
+    Flag = "KB_HybridMode",
+    Callback = function() HybridToggle:Set(not hybridMode) end
 })
 
 KeybindsTab:CreateKeybind({
@@ -352,15 +406,12 @@ KeybindsTab:CreateKeybind({
     CurrentKeybind = "N",
     HoldToInteract = false,
     Flag = "KB_Noclip",
-    Callback = function()
-        NoclipToggle:Set(not noclipEnabled)
-    end
+    Callback = function() NoclipToggle:Set(not noclipEnabled) end
 })
 
 --------------------------------------------------
 -- Core Target Logic
 --------------------------------------------------
-
 function getEnemies()
     local enemies = {}
     for _, obj in ipairs(workspace:GetDescendants()) do
@@ -369,8 +420,8 @@ function getEnemies()
         if hum and hum.Parent and hum.Parent ~= player.Character then
             local parentModel = hum.Parent
             
-            -- Ignore other players in the server
-            if not Players:GetPlayerFromCharacter(parentModel) then
+            -- Filter out DamageDummy (including DamageDummy1, DamageDummy2, etc.) and Players
+            if not string.find(parentModel.Name, "DamageDummy") and not Players:GetPlayerFromCharacter(parentModel) then
                 local hrp = parentModel:FindFirstChild("HumanoidRootPart")
                 local torso = parentModel:FindFirstChild("Torso") or parentModel:FindFirstChild("UpperTorso")
 
@@ -391,14 +442,12 @@ function getEnemies()
                     local bossHealthObj = hum:FindFirstChild("BossHealth")
                     local maxHealthObj = hum:FindFirstChild("MaxHealth")
 
-                    -- Resolve Current HP
                     if bossHealthObj and bossHealthObj:IsA("NumberValue") then
                         currentHP = bossHealthObj.Value
                     else
                         currentHP = hum.Health
                     end
 
-                    -- Resolve Max HP according to new rules
                     if maxHealthObj and maxHealthObj:IsA("NumberValue") then
                         maxHP = maxHealthObj.Value
                     else
@@ -409,7 +458,6 @@ function getEnemies()
                         end
                     end
 
-                    -- Only add if they are valid AND have more than 0 HP
                     if currentHP and currentHP > 0 and maxHP then
                         table.insert(enemies, {
                             hrp = hrp,
@@ -426,10 +474,68 @@ function getEnemies()
     return enemies
 end
 
+local function findTargetInList(enemies, onlySelected)
+    local bestTarget = nil
+    local bestHP = priorityHighToLow and -1 or math.huge
+
+    for _, enemy in ipairs(enemies) do
+        local valid = false
+        if onlySelected then
+            valid = (selectedEnemies[enemy.name] == true)
+        else
+            valid = (enemy.maxHealthValue < MAX_HP_THRESHOLD)
+            
+            -- Proximity Check: If in Hybrid Mode and we know where the boss spawns, 
+            -- do NOT travel to regular mobs outside the Camp Radius.
+            if valid and hybridMode and bossCampPosition then
+                local distanceToCamp = (enemy.hrp.Position - bossCampPosition).Magnitude
+                if distanceToCamp > CAMP_RADIUS then
+                    valid = false
+                end
+            end
+        end
+
+        if valid then
+            if priorityHighToLow then
+                if enemy.maxHealthValue > bestHP then
+                    bestHP = enemy.maxHealthValue
+                    bestTarget = enemy
+                end
+            else
+                if enemy.maxHealthValue < bestHP then
+                    bestHP = enemy.maxHealthValue
+                    bestTarget = enemy
+                end
+            end
+        end
+    end
+    return bestTarget
+end
+
+local function findNewTarget()
+    local enemies = getEnemies()
+    
+    if hybridMode then
+        -- Try Priority Bosses first
+        local prioTarget = findTargetInList(enemies, true)
+        if prioTarget then return prioTarget end
+        -- Fallback to local nearby mobs
+        return findTargetInList(enemies, false)
+    elseif autoFarmMode then
+        return findTargetInList(enemies, true)
+    elseif getgenv().TPToLowHP then
+        return findTargetInList(enemies, false)
+    end
+    
+    return nil
+end
+
 local function isValidTarget(enemy)
     if not enemy or not enemy.hrp or not enemy.hrp.Parent then return false end
     
-    -- Check the live health dynamically so we don't stay locked onto corpses
+    -- Final safety check to make absolutely sure no DamageDummy slips through
+    if string.find(enemy.name, "DamageDummy") then return false end
+    
     local liveHealth = enemy.humanoid.Health
     local bossHealthObj = enemy.humanoid:FindFirstChild("BossHealth")
     if bossHealthObj and bossHealthObj:IsA("NumberValue") then
@@ -437,67 +543,64 @@ local function isValidTarget(enemy)
     end
     
     if liveHealth <= 0 then return false end
-    if autoFarmMode then return selectedEnemies[enemy.name] == true end
     
-    return enemy.maxHealthValue < MAX_HP_THRESHOLD
-end
-
-local function isValidTarget(enemy)
-    if not enemy or not enemy.hrp or not enemy.hrp.Parent then return false end
-    if enemy.currentHealth <= 0 then return false end
-    if autoFarmMode then return selectedEnemies[enemy.name] == true end
-    return enemy.maxHealthValue < MAX_HP_THRESHOLD
-end
-
-local function findNewTarget()
-    local enemies = getEnemies()
-    local bestTarget = nil
-
-    if priorityHighToLow then
-        local highestHP = -1
-        for _, enemy in ipairs(enemies) do
-            if isValidTarget(enemy) and enemy.maxHealthValue > highestHP then
-                highestHP = enemy.maxHealthValue
-                bestTarget = enemy
-            end
+    if hybridMode then
+        if selectedEnemies[enemy.name] then return true end
+        
+        -- Fallback verification must respect the camp zone distance boundaries
+        if enemy.maxHealthValue >= MAX_HP_THRESHOLD then return false end
+        if bossCampPosition then
+            return (enemy.hrp.Position - bossCampPosition).Magnitude <= CAMP_RADIUS
         end
+        return true
+    elseif autoFarmMode then
+        return selectedEnemies[enemy.name] == true
     else
-        local lowestHP = math.huge
-        for _, enemy in ipairs(enemies) do
-            if isValidTarget(enemy) and enemy.maxHealthValue < lowestHP then
-                lowestHP = enemy.maxHealthValue
-                bestTarget = enemy
-            end
-        end
+        return enemy.maxHealthValue < MAX_HP_THRESHOLD
     end
-    return bestTarget
 end
 
 --------------------------------------------------
 -- Main Loop Execution Thread
 --------------------------------------------------
+local lastPriorityCheck = 0
 
 task.spawn(function()
     while scriptRunning do
-        local farmingActive = getgenv().TPToLowHP or autoFarmMode
+        local farmingActive = getgenv().TPToLowHP or autoFarmMode or hybridMode
         if farmingActive then
             local character = player.Character
             local root = character and character:FindFirstChild("HumanoidRootPart")
             local humanoid = character and character:FindFirstChildOfClass("Humanoid")
 
             if root and humanoid then
-                -- 1. If target is dead or invalid, clear it immediately
+                
+                -- Priority Overlap Check: If Hybrid Mode is ON, and we are currently fighting a fallback enemy,
+                -- Check every 0.5 seconds if a Priority (Selected) enemy has respawned.
+                if hybridMode and currentTarget and not selectedEnemies[currentTarget.name] then
+                    if tick() - lastPriorityCheck > 0.5 then
+                        lastPriorityCheck = tick()
+                        local prioTarget = findTargetInList(getEnemies(), true)
+                        if prioTarget then
+                            currentTarget = prioTarget -- Instantly switch
+                        end
+                    end
+                end
+
                 if currentTarget and not isValidTarget(currentTarget) then
                     currentTarget = nil
                 end
 
-                -- 2. If we don't have a target, find one instantly
                 if not currentTarget then
                     currentTarget = findNewTarget()
                 end
 
-                -- 3. If we now have a target, teleport and lock on
                 if currentTarget then
+                    -- Auto-save camp location when actively fighting a boss target
+                    if selectedEnemies[currentTarget.name] then
+                        bossCampPosition = currentTarget.hrp.Position
+                    end
+
                     local enemyCFrame = currentTarget.hrp.CFrame
                     local enemyPos = enemyCFrame.Position
                     
@@ -514,7 +617,6 @@ task.spawn(function()
                         R00, R01, R02, R10, R11, R12, R20, R21, R22
                     )
                     
-                    -- Update UI health dynamically without scanning the whole workspace
                     local liveHealth = currentTarget.humanoid.Health
                     local bossHealthObj = currentTarget.humanoid:FindFirstChild("BossHealth")
                     if bossHealthObj and bossHealthObj:IsA("NumberValue") then
@@ -522,8 +624,11 @@ task.spawn(function()
                     end
                     currentTarget.currentHealth = liveHealth
 
+                    local statusPrefix = (selectedEnemies[currentTarget.name]) and "[BOSS]" or "Target:"
+                    
                     TargetLabel:Set(string.format(
-                        "Target: %s | HP: %s/%s",
+                        "%s %s | HP: %s/%s",
+                        statusPrefix,
                         currentTarget.name,
                         formatNumber(currentTarget.currentHealth),
                         formatNumber(currentTarget.maxHealthValue)
@@ -531,25 +636,34 @@ task.spawn(function()
                     
                     task.wait(LOCK_DELAY)
                 else
-                    -- 4. Safe zone fallback (ONLY triggers if there are exactly 0 alive enemies on the map)
-                    TargetLabel:Set("Current Target: Searching (Safe Zone)")
-                    
-                    local zone = getOrCreateSafeZone()
-                    humanoid:ChangeState(Enum.HumanoidStateType.Physics)
-                    root.Velocity = Vector3.new(0, 0, 0)
-                    root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-                    
-                    -- Teleport player constantly slightly above the platform
-                    root.CFrame = CFrame.new(zone.Position + Vector3.new(0, 10, 0))
-                    
-                    task.wait(0.05)
+                    -- No targets matched. Choose waiting location based on streaming prevention rules.
+                    if hybridMode and bossCampPosition then
+                        TargetLabel:Set("Farming Idle: Camping Boss Spawn Zone")
+                        
+                        humanoid:ChangeState(Enum.HumanoidStateType.Physics)
+                        root.Velocity = Vector3.new(0, 0, 0)
+                        root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                        root.CFrame = CFrame.new(bossCampPosition + Vector3.new(0, FARM_DISTANCE, 0))
+                        
+                        task.wait(0.001)
+                    else
+                        TargetLabel:Set("Current Target: Searching (Safe Zone)")
+                        
+                        local zone = getOrCreateSafeZone()
+                        humanoid:ChangeState(Enum.HumanoidStateType.Physics)
+                        root.Velocity = Vector3.new(0, 0, 0)
+                        root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                        root.CFrame = CFrame.new(zone.Position + Vector3.new(0, 10, 0))
+                        
+                        task.wait(0.001)
+                    end
                 end
             else
-                task.wait(1)
+                task.wait(0.01)
             end
         else
             currentTarget = nil
-            task.wait(0.25)
+            task.wait(0.001)
         end
     end
 end)
@@ -558,4 +672,4 @@ end)
 -- Automatic Configuration Loading
 --------------------------------------------------
 Rayfield:LoadConfiguration()
-print("TP Lock Script Loaded and Configurations Synced")
+print("TP Lock Script Loaded and Configurations Synced")    
