@@ -918,6 +918,23 @@ task.spawn(function()
                     end
                     currentTarget.currentHealth = liveHealth
 
+                    -- ==========================================
+                    -- [NEW] AGGRESSIVE FAST-STOP CHECK
+                    -- Instantly fires the remote the millisecond Health hits 0
+                    -- ==========================================
+                    if liveHealth <= 0 then
+                        if isBossFarming then
+                            isBossFarming = false
+                            bossCooldowns[activeBossTargetName] = tick()
+                            fireStopBossRemote() -- Fired instantly!
+                            activeBossTargetName = nil
+                            remoteFired = false
+                        end
+                        currentTarget = nil
+                        continue -- Skip the task.wait and restart the loop immediately
+                    end
+                    -- ==========================================
+
                     local statusPrefix = isBossFarming and "[BOSS ACTIVE]" or "Target:"
                     TargetLabel:Set(string.format(
                         "%s %s | HP: %s/%s",
