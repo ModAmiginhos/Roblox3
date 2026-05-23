@@ -196,7 +196,7 @@ end
 -- Helper Functions for Remotes
 --------------------------------------------------
 local function fireStartBossRemote(bossName)
-    local remotes = {"StartAutofarm", "StartAutoFarm", "StartAutoBoss"}
+    local remotes = {"StartAutofarm"}
     for _, rName in ipairs(remotes) do
         local remote = ReplicatedStorage:FindFirstChild(rName)
         if remote and remote:IsA("RemoteEvent") then
@@ -207,7 +207,7 @@ local function fireStartBossRemote(bossName)
 end
 
 local function fireStopBossRemote()
-    local remotes = {"StopAutofarm", "StopAutoFarm", "StopAutoBoss", "CancelAutofarm"}
+    local remotes = {"StopAutoFarm"}
     for _, rName in ipairs(remotes) do
         local remote = ReplicatedStorage:FindFirstChild(rName)
         if remote and remote:IsA("RemoteEvent") then
