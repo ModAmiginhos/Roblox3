@@ -10,9 +10,9 @@ local player = Players.LocalPlayer
 
 getgenv().TPToLowHP = true
 
-local LOCK_DELAY = 0.015
-local MAX_HP_THRESHOLD = 1e15
-local FARM_DISTANCE = 4 -- Default positioning value
+local LOCK_DELAY = 0.005
+local MAX_HP_THRESHOLD = 15e21
+local FARM_DISTANCE = -40 -- Default positioning value
 
 local currentTarget = nil
 local scriptRunning = true
@@ -763,12 +763,18 @@ task.spawn(function()
                     end
                     
                     local bossAlive = false
+                    local bossDeadInstance = false -- NEW: Tracks if we find the boss already dead
+
                     if bossObject then
                         local bHum = bossObject:FindFirstChildOfClass("Humanoid")
-                        if bHum and bHum:GetState() ~= Enum.HumanoidStateType.Dead and bHum.Health > 0 then
+                        if bHum then
                             local bHealthObj = bHum:FindFirstChild("BossHealth")
                             local hp = (bHealthObj and bHealthObj:IsA("NumberValue")) and bHealthObj.Value or bHum.Health
-                            if hp > 0 then
+                            
+                            -- Fix: Explicitly catch instant-kills before the script registers them as alive
+                            if bHum:GetState() == Enum.HumanoidStateType.Dead or bHum.Health <= 0 or hp <= 0 then
+                                bossDeadInstance = true
+                            else
                                 bossAlive = true
                             end
                         end
@@ -785,7 +791,8 @@ task.spawn(function()
                         end
                     end
                     
-                    if not bossAlive and bossWasFound then
+                    -- FIX: Trigger stop if the boss was seen alive (bossWasFound) OR if it was DOA (bossDeadInstance)
+                    if not bossAlive and (bossWasFound or bossDeadInstance) then
                         -- BOSS WAS KILLED: Instantly register death, trigger cooldown and sever connection
                         isBossFarming = false
                         bossCooldowns[activeBossTargetName] = tick()
@@ -873,25 +880,16 @@ task.spawn(function()
                     TargetLabel:Set("Current Target: Searching (Safe Zone)")
                     
                     local zone = getOrCreateSafeZone()
-                    humanoid:ChangeState(Enum.HumanoidStateType.Physics)
-                    root.Velocity = Vector3.new(0, 0, 0)
-                    root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-                    root.CFrame = CFrame.new(zone.Position + Vector3.new(0, 10, 0))
+                    root.CFrame = zone.CFrame + Vector3.new(0, 10, 0)
                     
-                    task.wait(0.05)
+                    humanoid:ChangeState(Enum.HumanoidStateType.RunningNoPhysics)
+                    root.Velocity = Vector3.new(0, 0, 0)
+                    
+                    task.wait(0.1)
                 end
-            else
-                task.wait(1)
             end
         else
-            currentTarget = nil
-            task.wait(0.25)
+            task.wait(0.5)
         end
     end
 end)
-
---------------------------------------------------
--- Automatic Configuration Loading
---------------------------------------------------
-Rayfield:LoadConfiguration()
-print("TP Lock Script Loaded and Configurations Synced")
