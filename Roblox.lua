@@ -1,5 +1,5 @@
 -- TP Lock Script (Global Vector Position + Rotation Alignment Patch)
--- Features: RS Global Scanning, Complete Modifier Filter, Strict Cooldowns, Auto Bosses, and Anti-GameplayPaused
+-- Features: RS Global Scanning, Complete Modifier Filter, Strict Cooldowns, Auto Bosses, Anti-GameplayPaused, and Blacklist
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -17,7 +17,14 @@ local FARM_DISTANCE = -40
 
 local currentTarget = nil
 local scriptRunning = true
-
+--------------------------------------------------
+-- BLACKLIST SYSTEM (Add enemies to ignore here)
+--------------------------------------------------
+local BLACKLIST = {
+    ["Skeleton King"] = true,
+    -- Add more enemies below by copying the format:
+    -- ["Some Other Boss"] = true,
+}
 --------------------------------------------------
 -- GameplayPaused Remover System
 --------------------------------------------------
@@ -96,24 +103,10 @@ end
 -- MODIFIER FILTER SYSTEM (Master List)
 --------------------------------------------------
 local INLINE_MODIFIERS = {
-    "Transcendental",
-    "Sanguine",
-    "Godlike",
-    "Ethereal",
-    "Spectral",
-    "Electric",
-    "Infernal",
-    "Inverted",
-    "Colossal",
-    "Abyssal",
-    "Rainbow",
-    "Glacial",
-    "Golden",
-    "Solar",
-    "Lunar",
-    "Small",
-    "Huge",
-    "Big"
+    "Transcendental", "Sanguine", "Godlike", "Ethereal", "Spectral", 
+    "Electric", "Infernal", "Inverted", "Colossal", "Abyssal", 
+    "Rainbow", "Glacial", "Golden", "Solar", "Lunar", "Small", 
+    "Huge", "Big"
 }
 
 local function getBaseName(model)
@@ -154,6 +147,7 @@ local function getBossesFromRS()
     local bossesFolder = ReplicatedStorage:FindFirstChild("Bosses")
     if bossesFolder then
         for _, bossModel in ipairs(bossesFolder:GetChildren()) do
+            if BLACKLIST[bossModel.Name] then continue end -- Added this line
             local hum = bossModel:FindFirstChildOfClass("Humanoid")
             if hum then
                 local maxHP = hum.MaxHealth
@@ -189,10 +183,10 @@ end
 local function getAllEnemiesFromRS()
     local uniqueEnemies = {}
     
-    for _, obj in ipairs(ReplicatedStorage:GetDescendants()) do
-        if obj:IsA("Model") and obj:FindFirstChildOfClass("Humanoid") then
-            local baseName = getBaseName(obj)
-            
+        for _, obj in ipairs(ReplicatedStorage:GetDescendants()) do
+            if obj:IsA("Model") and obj:FindFirstChildOfClass("Humanoid") then
+                if BLACKLIST[obj.Name] then continue end -- Added this line
+                local baseName = getBaseName(obj)
             if not allKnownBosses[obj.Name] and not allKnownBosses[baseName] and not string.find(obj.Name, "DamageDummy") then
                 local hum = obj:FindFirstChildOfClass("Humanoid")
                 local maxHP = hum.MaxHealth
@@ -233,7 +227,8 @@ function getEnemies()
             if hum:GetState() == Enum.HumanoidStateType.Dead or hum.Health <= 0 then continue end
             
             local baseEnemyName = getBaseName(parentModel)
-            
+            if BLACKLIST[parentModel.Name] or BLACKLIST[baseEnemyName] then continue end -- Added this line
+
             local isTargetable = true
             if allKnownBosses[parentModel.Name] or allKnownBosses[baseEnemyName] then
                 if not (getgenv().isBossFarmingActive and (getgenv().activeBossTarget == parentModel.Name or getgenv().activeBossTarget == baseEnemyName)) then
@@ -261,7 +256,6 @@ function getEnemies()
 
                     if bossHealthObj and bossHealthObj:IsA("NumberValue") then currentHP = bossHealthObj.Value else currentHP = hum.Health end
                     
-                    -- PATCH: Check if baseEnemyName == "Slime" instead of exact parentModel.Name
                     if maxHealthObj and maxHealthObj:IsA("NumberValue") then 
                         maxHP = maxHealthObj.Value 
                     else 
@@ -361,7 +355,6 @@ local function fireStopBossRemote()
     end
 end
 
--- PATCH: Robust Boss Searcher that ignores modifier names
 local function findBossInWorkspace(bossName)
     local wsBosses = workspace:FindFirstChild("Bosses")
     local containers = wsBosses and {wsBosses, workspace} or {workspace}
@@ -764,7 +757,6 @@ task.spawn(function()
                 if getgenv().isBossFarmingActive then
                     if not remoteFired then fireStartBossRemote(getgenv().activeBossTarget); remoteFired = true end
 
-                    -- PATCH: Finding the boss securely even if it has a modifier in its name
                     local bossObject = findBossInWorkspace(getgenv().activeBossTarget)
                     
                     local bossAlive = false
