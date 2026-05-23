@@ -19,7 +19,7 @@ local scriptRunning = true
 
 -- Modes
 local autoFarmMode = false
-local priorityHighToLow = false -- false = Low→High, true = High→Low
+local priorityHighToLow = true -- false = Low→High, true = High→Low
 
 -- Auto Equip Variables
 local autoEquipEnabled = false
