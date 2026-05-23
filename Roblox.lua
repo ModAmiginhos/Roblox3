@@ -21,7 +21,7 @@ local scriptRunning = true
 -- BLACKLIST SYSTEM (Add enemies to ignore here)
 --------------------------------------------------
 local BLACKLIST = {
-    ["Skeleton King"] = true,
+    ["Golem"] = true,
     -- Add more enemies below by copying the format:
     -- ["Some Other Boss"] = true,
 }
