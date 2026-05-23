@@ -147,7 +147,7 @@ local function getBossesFromRS()
     local bossesFolder = ReplicatedStorage:FindFirstChild("Bosses")
     if bossesFolder then
         for _, bossModel in ipairs(bossesFolder:GetChildren()) do
-            if BLACKLIST[bossModel.Name] then continue end -- Added this line
+            if BLACKLIST[bossModel.Name] then continue end 
             local hum = bossModel:FindFirstChildOfClass("Humanoid")
             if hum then
                 local maxHP = hum.MaxHealth
@@ -183,11 +183,11 @@ end
 local function getAllEnemiesFromRS()
     local uniqueEnemies = {}
     
-        for _, obj in ipairs(ReplicatedStorage:GetDescendants()) do
-            if obj:IsA("Model") and obj:FindFirstChildOfClass("Humanoid") then
-                if BLACKLIST[obj.Name] then continue end -- Added this line
-                local baseName = getBaseName(obj)
-            if not allKnownBosses[obj.Name] and not allKnownBosses[baseName] and not string.find(obj.Name, "DamageDummy") then
+    for _, obj in ipairs(ReplicatedStorage:GetDescendants()) do
+        if obj:IsA("Model") and obj:FindFirstChildOfClass("Humanoid") then
+            if BLACKLIST[obj.Name] then continue end 
+            local baseName = getBaseName(obj)
+            if not string.find(obj.Name, "DamageDummy") then -- Modified: Removed boss filtering to include bosses in selection
                 local hum = obj:FindFirstChildOfClass("Humanoid")
                 local maxHP = hum.MaxHealth
                 local maxHealthObj = hum:FindFirstChild("MaxHealth")
@@ -227,12 +227,17 @@ function getEnemies()
             if hum:GetState() == Enum.HumanoidStateType.Dead or hum.Health <= 0 then continue end
             
             local baseEnemyName = getBaseName(parentModel)
-            if BLACKLIST[parentModel.Name] or BLACKLIST[baseEnemyName] then continue end -- Added this line
+            if BLACKLIST[parentModel.Name] or BLACKLIST[baseEnemyName] then continue end 
 
             local isTargetable = true
             if allKnownBosses[parentModel.Name] or allKnownBosses[baseEnemyName] then
                 if not (getgenv().isBossFarmingActive and (getgenv().activeBossTarget == parentModel.Name or getgenv().activeBossTarget == baseEnemyName)) then
-                    isTargetable = false
+                    -- Modified: Allows targeting if Auto Farm Selected mode is on and this boss is checked
+                    if autoFarmMode and (selectedEnemies[parentModel.Name] or selectedEnemies[baseEnemyName]) then
+                        isTargetable = true
+                    else
+                        isTargetable = false
+                    end
                 end
             end
 
@@ -484,7 +489,7 @@ local AutoFarmStatusLabel = AutoFarmTab:CreateLabel("Auto Farm: DISABLED")
 local SelectedCountLabel = AutoFarmTab:CreateLabel("Selected Enemies: 0")
 
 local EnemyDropdown = AutoFarmTab:CreateDropdown({
-    Name = "Select Enemies", Options = {}, CurrentOption = {}, MultipleOptions = true, Flag = "SelectedEnemiesList",
+    Name = "Select Enemies & Bosses", Options = {}, CurrentOption = {}, MultipleOptions = true, Flag = "SelectedEnemiesList",
     Callback = function(Options)
         selectedEnemies = {}
         for _, displayName in ipairs(Options) do
@@ -652,7 +657,7 @@ local function isValidTarget(enemy)
     if liveHealth <= 0 then return false end
 
     if autoFarmMode then
-        return selectedEnemies[enemy.name] == true
+        return selectedEnemies[enemy.name] == true or selectedEnemies[enemy.realName] == true
     else
         return enemy.maxHealthValue < MAX_HP_THRESHOLD
     end
@@ -666,7 +671,7 @@ local function findNewTarget()
     for _, enemy in ipairs(enemies) do
         local valid = false
         if autoFarmMode then
-            valid = (selectedEnemies[enemy.name] == true)
+            valid = (selectedEnemies[enemy.name] == true or selectedEnemies[enemy.realName] == true)
         elseif getgenv().TPToLowHP then
             valid = (enemy.maxHealthValue < MAX_HP_THRESHOLD)
         end
