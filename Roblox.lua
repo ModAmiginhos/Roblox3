@@ -1,5 +1,5 @@
 -- TP Lock Script (Global Vector Position + Rotation Alignment Patch)
--- Features: Safe Zone System, Noclip, Keybinds, Dummy Blacklist, and Remote-Triggered Auto Bosses
+-- Features: Auto Equip, Safe Zone System, Noclip, Keybinds, Dummy Blacklist, and Remote-Triggered Auto Bosses
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -21,10 +21,14 @@ local scriptRunning = true
 local autoFarmMode = false
 local priorityHighToLow = false -- false = Low→High, true = High→Low
 
+-- Auto Equip Variables
+local autoEquipEnabled = false
+local selectedWeapon = nil
+
 -- Boss Handling Variables
 local autoBossMode = false
 local isBossFarming = false
-local lastBossKillTime = 0
+local bossCooldowns = {} -- Tracks individual cooldowns: bossCooldowns["BossName"] = tick()
 local activeBossTargetName = nil
 local bossWasFound = false
 local bossWaitTimeout = 0
@@ -115,6 +119,8 @@ local Window = Rayfield:CreateWindow({
     KeySystem = false
 })
 
+-- TABS
+local AutoEquipTab = Window:CreateTab("Auto Equip", 4483362458)
 local MainTab = Window:CreateTab("Auto Farm All", 4483362458)
 local AutoFarmTab = Window:CreateTab("Auto Farm Selected", 4483362458)
 local AutoBossTab = Window:CreateTab("Auto Bosses", 4483362458)
@@ -122,10 +128,68 @@ local SettingsTab = Window:CreateTab("Settings", 4483362458)
 local KeybindsTab = Window:CreateTab("Keybinds", 4483362458) 
 
 -- Forward Declarations for Toggles
-local TPToggle, AutoFarmToggle, AutoBossToggle
+local TPToggle, AutoFarmToggle, AutoBossToggle, AutoEquipToggle
 
 --------------------------------------------------
--- Main Tab Components
+-- Auto Equip Components (Tab 1)
+--------------------------------------------------
+local AutoEquipStatusLabel = AutoEquipTab:CreateLabel("Auto Equip: DISABLED")
+
+local WeaponDropdown = AutoEquipTab:CreateDropdown({
+    Name = "Select Weapon",
+    Options = {},
+    CurrentOption = {},
+    MultipleOptions = false,
+    Flag = "AutoEquipSelectedWeapon", -- It is safe to save this
+    Callback = function(Option)
+        if Option and Option[1] then
+            selectedWeapon = Option[1]
+        else
+            selectedWeapon = nil
+        end
+    end
+})
+
+AutoEquipTab:CreateButton({
+    Name = "Refresh Weapons",
+    Callback = function()
+        local options = {}
+        local uniqueWeapons = {}
+        
+        -- Scan Backpack
+        for _, item in ipairs(player.Backpack:GetChildren()) do
+            if item:IsA("Tool") and not uniqueWeapons[item.Name] then
+                uniqueWeapons[item.Name] = true
+                table.insert(options, item.Name)
+            end
+        end
+        
+        -- Scan Character (if tool is already equipped)
+        if player.Character then
+            for _, item in ipairs(player.Character:GetChildren()) do
+                if item:IsA("Tool") and not uniqueWeapons[item.Name] then
+                    uniqueWeapons[item.Name] = true
+                    table.insert(options, item.Name)
+                end
+            end
+        end
+        
+        WeaponDropdown:Refresh(options)
+    end
+})
+
+AutoEquipToggle = AutoEquipTab:CreateToggle({
+    Name = "Enable Auto Equip",
+    CurrentValue = false,
+    Flag = "AutoEquipEnabled",
+    Callback = function(Value)
+        autoEquipEnabled = Value
+        AutoEquipStatusLabel:Set("Auto Equip: " .. (Value and "ENABLED" or "DISABLED"))
+    end
+})
+
+--------------------------------------------------
+-- Main Tab Components (Auto Farm All)
 --------------------------------------------------
 local StatusLabel = MainTab:CreateLabel("Status: ENABLED")
 local TargetLabel = MainTab:CreateLabel("Current Target: None")
@@ -208,26 +272,6 @@ local EnemyDropdown = AutoFarmTab:CreateDropdown({
     end
 })
 
-AutoFarmToggle = AutoFarmTab:CreateToggle({
-    Name = "Enable Auto Farm (Selected ONLY)",
-    CurrentValue = false,
-    Flag = "AutoFarmEnabled",
-    Callback = function(Value)
-        if changingToggles then return end
-        autoFarmMode = Value
-        if Value then
-            changingToggles = true
-            if TPToggle then TPToggle:Set(false) end
-            changingToggles = false
-            
-            getgenv().TPToLowHP = false
-        else
-            currentTarget = nil
-        end
-        AutoFarmStatusLabel:Set("Auto Farm: " .. (Value and "ENABLED" or "DISABLED"))
-    end
-})
-
 AutoFarmTab:CreateButton({
     Name = "Refresh Enemy List",
     Callback = function()
@@ -270,14 +314,15 @@ AutoFarmTab:CreateButton({
 --------------------------------------------------
 local BossCooldownLabel = AutoBossTab:CreateLabel("Auto Bosses: DISABLED")
 local SelectedBossesCountLabel = AutoBossTab:CreateLabel("Selected Bosses: 0")
-AutoBossTab:CreateLabel("Farms bosses, then farms regular NPCs during the 30s cooldown.")
+AutoBossTab:CreateLabel("Farms bosses, then farms regular NPCs during their cooldowns.")
+AutoBossTab:CreateLabel("Note: Boss settings DO NOT save to prevent script glitches.")
 
 local BossDropdown = AutoBossTab:CreateDropdown({
     Name = "Select Bosses",
     Options = {},
     CurrentOption = {},
     MultipleOptions = true,
-    Flag = "SelectedBossesList",
+    -- FLAG REMOVED DELIBERATELY TO PREVENT SAVING/GLITCHING
     Callback = function(Options)
         selectedBosses = {}
         for _, displayName in ipairs(Options) do
@@ -291,7 +336,7 @@ local BossDropdown = AutoBossTab:CreateDropdown({
 AutoBossToggle = AutoBossTab:CreateToggle({
     Name = "Enable Auto Bosses",
     CurrentValue = false,
-    Flag = "AutoBossEnabled",
+    -- FLAG REMOVED DELIBERATELY TO PREVENT SAVING/GLITCHING
     Callback = function(Value)
         autoBossMode = Value
         if not Value then
@@ -401,6 +446,7 @@ SettingsTab:CreateButton({
         currentTarget = nil
         autoFarmMode = false
         autoBossMode = false
+        autoEquipEnabled = false
         getgenv().TPToLowHP = false
         if isBossFarming then
             local stopRemote = ReplicatedStorage:FindFirstChild("StopAutoFarm")
@@ -516,6 +562,28 @@ local function isValidTarget(enemy)
     if not enemy or not enemy.hrp or not enemy.hrp.Parent then return false end
     if string.find(enemy.name, "DamageDummy") then return false end
     
+    -- If we are farming a boss, STRICTLY check workspace.Bosses to prevent lingering on dead bosses
+    if isBossFarming and enemy.name == activeBossTargetName then
+        local wsBosses = workspace:FindFirstChild("Bosses")
+        if not wsBosses then return false end
+        
+        local theBoss = wsBosses:FindFirstChild(enemy.name)
+        if not theBoss then return false end -- Boss is removed from workspace
+        
+        local hum = theBoss:FindFirstChildOfClass("Humanoid")
+        if not hum then return false end
+        
+        local liveHealth = hum.Health
+        local bossHealthObj = hum:FindFirstChild("BossHealth")
+        if bossHealthObj and bossHealthObj:IsA("NumberValue") then
+            liveHealth = bossHealthObj.Value
+        end
+        
+        if liveHealth <= 0 then return false end
+        return true
+    end
+
+    -- Normal NPC checks
     local liveHealth = enemy.humanoid.Health
     local bossHealthObj = enemy.humanoid:FindFirstChild("BossHealth")
     if bossHealthObj and bossHealthObj:IsA("NumberValue") then
@@ -523,11 +591,6 @@ local function isValidTarget(enemy)
     end
     
     if liveHealth <= 0 then return false end
-    
-    -- If we are in Boss Mode, skip max health filters for the active boss
-    if isBossFarming and enemy.name == activeBossTargetName then
-        return true
-    end
 
     if autoFarmMode then
         return selectedEnemies[enemy.name] == true
@@ -567,22 +630,66 @@ local function findNewTarget()
 end
 
 --------------------------------------------------
--- Main Loop Execution Thread
+-- Auto Equip Thread
+--------------------------------------------------
+task.spawn(function()
+    while scriptRunning do
+        if autoEquipEnabled and selectedWeapon then
+            local char = player.Character
+            local hum = char and char:FindFirstChildOfClass("Humanoid")
+            
+            if char and hum and hum.Health > 0 then
+                -- Check if the tool is already equipped
+                local toolEquipped = char:FindFirstChild(selectedWeapon)
+                
+                if not toolEquipped then
+                    -- If not equipped, look for it in the Backpack and equip it
+                    local toolInBackpack = player.Backpack:FindFirstChild(selectedWeapon)
+                    if toolInBackpack and toolInBackpack:IsA("Tool") then
+                        hum:EquipTool(toolInBackpack)
+                    end
+                end
+            end
+        end
+        task.wait(0.2) -- Loop runs 5 times a second to keep the weapon equipped smoothly
+    end
+end)
+
+--------------------------------------------------
+-- Main Auto Farm Execution Thread
 --------------------------------------------------
 task.spawn(function()
     while scriptRunning do
         local farmingActive = getgenv().TPToLowHP or autoFarmMode or autoBossMode
         
-        -- UI Cooldown Updater
+        -- Individual Cooldown UI Updater
         if autoBossMode then
             if isBossFarming then
-                BossCooldownLabel:Set("Next Boss In: Farming...")
+                BossCooldownLabel:Set("Farming Boss: " .. tostring(activeBossTargetName))
             else
-                local timeRemaining = math.max(0, 30 - (tick() - lastBossKillTime))
-                if timeRemaining > 0 then
-                    BossCooldownLabel:Set(string.format("Next Boss In: %.1fs", timeRemaining))
-                else
-                    BossCooldownLabel:Set("Next Boss In: Ready")
+                local lowestCooldown = math.huge
+                local nextBossReadyName = nil
+                local anySelected = false
+                
+                for bossName, _ in pairs(selectedBosses) do
+                    anySelected = true
+                    local lastKill = bossCooldowns[bossName] or 0
+                    local remaining = math.max(0, 30 - (tick() - lastKill))
+                    
+                    if remaining < lowestCooldown then
+                        lowestCooldown = remaining
+                        nextBossReadyName = bossName
+                    end
+                end
+                
+                if not anySelected then
+                    BossCooldownLabel:Set("Auto Bosses: Select a Boss!")
+                elseif nextBossReadyName then
+                    if lowestCooldown == 0 then
+                        BossCooldownLabel:Set("Next Boss: Ready!")
+                    else
+                        BossCooldownLabel:Set(string.format("Next Boss (%s) in: %.1fs", nextBossReadyName, lowestCooldown))
+                    end
                 end
             end
         end
@@ -594,9 +701,17 @@ task.spawn(function()
 
             if root and humanoid then
                 
-                -- Boss Trigger Logic
-                if autoBossMode and not isBossFarming and (tick() - lastBossKillTime >= 30) then
-                    local bossToSpawn = next(selectedBosses)
+                -- Check individual boss cooldowns to see who is ready to be spawned
+                if autoBossMode and not isBossFarming then
+                    local bossToSpawn = nil
+                    for bossName, _ in pairs(selectedBosses) do
+                        local lastKill = bossCooldowns[bossName] or 0
+                        if tick() - lastKill >= 30 then
+                            bossToSpawn = bossName
+                            break -- Found a boss ready to spawn
+                        end
+                    end
+                    
                     if bossToSpawn then
                         isBossFarming = true
                         bossWasFound = false
@@ -629,10 +744,15 @@ task.spawn(function()
                         end
                         
                         if not bossFoundNow then
-                            -- If boss was found and is now gone/dead, OR if 10 seconds pass without spawning
+                            -- If boss died/disappeared OR if 10 seconds pass without it spawning
                             if bossWasFound or (tick() - bossWaitTimeout > 10) then
                                 isBossFarming = false
-                                lastBossKillTime = tick()
+                                
+                                -- Set the specific cooldown for THIS boss
+                                if activeBossTargetName then
+                                    bossCooldowns[activeBossTargetName] = tick()
+                                end
+                                
                                 activeBossTargetName = nil
                                 
                                 local stopRemote = ReplicatedStorage:FindFirstChild("StopAutoFarm")
@@ -676,14 +796,32 @@ task.spawn(function()
                         R00, R01, R02, R10, R11, R12, R20, R21, R22
                     )
                     
-                    local liveHealth = currentTarget.humanoid.Health
-                    local bossHealthObj = currentTarget.humanoid:FindFirstChild("BossHealth")
-                    if bossHealthObj and bossHealthObj:IsA("NumberValue") then
-                        liveHealth = bossHealthObj.Value
+                    -- Dynamic Target Label Updating
+                    local liveHealth = 0
+                    if isBossFarming and currentTarget.name == activeBossTargetName then
+                        -- Strict Workspace Check for Boss UI
+                        local wsBosses = workspace:FindFirstChild("Bosses")
+                        if wsBosses then
+                            local theBoss = wsBosses:FindFirstChild(currentTarget.name)
+                            if theBoss and theBoss:FindFirstChildOfClass("Humanoid") then
+                                local bHum = theBoss:FindFirstChildOfClass("Humanoid")
+                                local bHealthObj = bHum:FindFirstChild("BossHealth")
+                                liveHealth = (bHealthObj and bHealthObj:IsA("NumberValue")) and bHealthObj.Value or bHum.Health
+                            end
+                        end
+                    else
+                        -- Normal NPC Check
+                        local bossHealthObj = currentTarget.humanoid:FindFirstChild("BossHealth")
+                        if bossHealthObj and bossHealthObj:IsA("NumberValue") then
+                            liveHealth = bossHealthObj.Value
+                        else
+                            liveHealth = currentTarget.humanoid.Health
+                        end
                     end
+                    
                     currentTarget.currentHealth = liveHealth
 
-                    local statusPrefix = isBossFarming and "[BOSS SPAWNER]" or "Target:"
+                    local statusPrefix = isBossFarming and "[BOSS ACTIVE]" or "Target:"
                     TargetLabel:Set(string.format(
                         "%s %s | HP: %s/%s",
                         statusPrefix,
