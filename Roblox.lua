@@ -1,21 +1,65 @@
 -- TP Lock Script (Global Vector Position + Rotation Alignment Patch)
--- Features: Strict Cooldown Enforcement, Auto Equip, Safe Zone, Noclip, and Auto Bosses
+-- Features: Strict Cooldown Enforcement, Auto Equip, Safe Zone, Noclip, Auto Bosses, and Anti-GameplayPaused
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local CoreGui = game:GetService("CoreGui")
 
 local player = Players.LocalPlayer
 
 getgenv().TPToLowHP = true
 
-local LOCK_DELAY = 0.005
-local MAX_HP_THRESHOLD = 15e21
-local FARM_DISTANCE = -40 -- Default positioning value
+local LOCK_DELAY = 0.001
+local MAX_HP_THRESHOLD = 150e21
+local FARM_DISTANCE = -40 -- Positioned below target
 
 local currentTarget = nil
 local scriptRunning = true
+
+--------------------------------------------------
+-- GameplayPaused Remover System
+--------------------------------------------------
+local function removeGameplayPaused()
+    pcall(function()
+        if player.GameplayPaused then
+            if sethiddenproperty then
+                sethiddenproperty(player, "GameplayPaused", false)
+            else
+                player.GameplayPaused = false
+            end
+        end
+    end)
+end
+
+player:GetPropertyChangedSignal("GameplayPaused"):Connect(removeGameplayPaused)
+
+task.spawn(function()
+    while scriptRunning do
+        -- 1. Try to override the property
+        removeGameplayPaused()
+        
+        -- 2. Fallback: Force-hide the physical CoreGui prompt if it slips through
+        pcall(function()
+            local robloxGui = CoreGui:FindFirstChild("RobloxGui")
+            if robloxGui and robloxGui:FindFirstChild("PromptOverlay") then
+                for _, child in ipairs(robloxGui.PromptOverlay:GetChildren()) do
+                    if child.Name == "ErrorPrompt" then
+                        local msgArea = child:FindFirstChild("MessageArea")
+                        local errFrame = msgArea and msgArea:FindFirstChild("ErrorFrame")
+                        local errMsg = errFrame and errFrame:FindFirstChild("ErrorMessage")
+                        
+                        if errMsg and string.find(string.lower(errMsg.Text), "gameplay paused") then
+                            child.Visible = false
+                        end
+                    end
+                end
+            end
+        end)
+        task.wait(0.05)
+    end
+end)
 
 -- Modes
 local autoFarmMode = false
@@ -261,7 +305,7 @@ RefreshWeapons()
 --------------------------------------------------
 local StatusLabel = MainTab:CreateLabel("Status: ENABLED")
 local TargetLabel = MainTab:CreateLabel("Current Target: None")
-local PriorityLabel = MainTab:CreateLabel("Priority: Low HP → High HP")
+local PriorityLabel = MainTab:CreateLabel("Priority: High HP → Low HP")
 
 TPToggle = MainTab:CreateToggle({
     Name = "Enable TP Lock",
@@ -284,7 +328,7 @@ TPToggle = MainTab:CreateToggle({
 
 local PriorityToggle = MainTab:CreateToggle({
     Name = "Target Sorting: High HP First",
-    CurrentValue = false,
+    CurrentValue = priorityHighToLow,
     Flag = "PriorityHighHP",
     Callback = function(Value)
         priorityHighToLow = Value
@@ -536,6 +580,11 @@ function getEnemies()
         if hum and hum.Parent and hum.Parent ~= player.Character then
             local parentModel = hum.Parent
             
+            -- FIX 1: If the NPC is dead or already entering a dead state, discard completely from scanning phase
+            if hum:GetState() == Enum.HumanoidStateType.Dead or hum.Health <= 0 then
+                continue
+            end
+            
             -- STRICT BOSS FILTER
             local isTargetable = true
             if allKnownBosses[parentModel.Name] then
@@ -599,6 +648,12 @@ end
 
 local function isValidTarget(enemy)
     if not enemy or not enemy.hrp or not enemy.hrp.Parent then return false end
+    
+    -- FIX 2: Check if the Humanoid was unparented/destroyed by the engine during a death transition
+    if not enemy.humanoid or not enemy.humanoid.Parent or enemy.humanoid.Parent ~= enemy.hrp.Parent then return false end
+    
+    -- FIX 3: Check Humanoid State explicitly. If dead, this target is instantly rejected
+    if enemy.humanoid:GetState() == Enum.HumanoidStateType.Dead then return false end
     if string.find(enemy.name, "DamageDummy") then return false end
     
     local liveHealth = enemy.humanoid.Health
@@ -665,7 +720,7 @@ task.spawn(function()
                 end
             end
         end
-        task.wait(0.2)
+        task.wait(0.01) -- Minimal delay
     end
 end)
 
@@ -741,14 +796,13 @@ task.spawn(function()
                         bossWasFound = false
                         activeBossTargetName = bossToSpawn
                         bossWaitTimeout = tick()
-                        remoteFired = false -- Reset remote throttle flag
+                        remoteFired = false 
                         currentTarget = nil 
                     end
                 end
 
                 -- Dedicated Boss Farming Phase
                 if isBossFarming then
-                    -- Fire remote ONCE per boss cycle to keep network lanes empty for immediate stop processing
                     if not remoteFired then
                         fireStartBossRemote(activeBossTargetName)
                         remoteFired = true
@@ -763,7 +817,7 @@ task.spawn(function()
                     end
                     
                     local bossAlive = false
-                    local bossDeadInstance = false -- NEW: Tracks if we find the boss already dead
+                    local bossDeadInstance = false
 
                     if bossObject then
                         local bHum = bossObject:FindFirstChildOfClass("Humanoid")
@@ -771,7 +825,6 @@ task.spawn(function()
                             local bHealthObj = bHum:FindFirstChild("BossHealth")
                             local hp = (bHealthObj and bHealthObj:IsA("NumberValue")) and bHealthObj.Value or bHum.Health
                             
-                            -- Fix: Explicitly catch instant-kills before the script registers them as alive
                             if bHum:GetState() == Enum.HumanoidStateType.Dead or bHum.Health <= 0 or hp <= 0 then
                                 bossDeadInstance = true
                             else
@@ -780,7 +833,6 @@ task.spawn(function()
                         end
                     end
                     
-                    -- CRITICAL: Instantly monitor if the current target data array hit zero directly 
                     if currentTarget and currentTarget.name == activeBossTargetName then
                         local bHum = currentTarget.humanoid
                         local bHealthObj = bHum:FindFirstChild("BossHealth")
@@ -791,9 +843,7 @@ task.spawn(function()
                         end
                     end
                     
-                    -- FIX: Trigger stop if the boss was seen alive (bossWasFound) OR if it was DOA (bossDeadInstance)
                     if not bossAlive and (bossWasFound or bossDeadInstance) then
-                        -- BOSS WAS KILLED: Instantly register death, trigger cooldown and sever connection
                         isBossFarming = false
                         bossCooldowns[activeBossTargetName] = tick()
                         fireStopBossRemote()
@@ -802,7 +852,6 @@ task.spawn(function()
                         remoteFired = false
                         
                     elseif not bossAlive and not bossWasFound then
-                        -- Awaiting Boss Spawn / Timeout check
                         if tick() - bossWaitTimeout > 10 then
                             isBossFarming = false
                             bossCooldowns[activeBossTargetName] = tick()
@@ -812,11 +861,9 @@ task.spawn(function()
                             remoteFired = false
                         end
                     else
-                        -- Boss is alive and fighting
                         bossWasFound = true
                         bossWaitTimeout = tick() 
                         
-                        -- Enforce lock-on exclusively to the boss
                         if not currentTarget or currentTarget.name ~= activeBossTargetName or not currentTarget.hrp or not currentTarget.hrp.Parent then
                             currentTarget = nil
                             for _, enemy in ipairs(getEnemies()) do
@@ -840,6 +887,11 @@ task.spawn(function()
                 end
 
                 -- Movement & Rotation
+                -- FIX 4: Safety gate validation performed right before CFrame application to force an absolute 0-frame corpse drop
+                if currentTarget and not isValidTarget(currentTarget) then
+                    currentTarget = nil
+                end
+
                 if currentTarget then
                     local enemyCFrame = currentTarget.hrp.CFrame
                     local enemyPos = enemyCFrame.Position
@@ -885,11 +937,11 @@ task.spawn(function()
                     humanoid:ChangeState(Enum.HumanoidStateType.RunningNoPhysics)
                     root.Velocity = Vector3.new(0, 0, 0)
                     
-                    task.wait(0.1)
+                    task.wait(0.01) -- Minimal delay
                 end
             end
         else
-            task.wait(0.5)
+            task.wait(0.1) -- Minimal delay to preserve performance while inactive
         end
     end
 end)
