@@ -990,7 +990,7 @@ task.spawn(function()
         end
         
         -- 2. Dynamic Boss Cooldown Modifier (5x faster on Blood Moon)
-        local cooldownTime = (getgenv().CurrentMoon == "Blood Moon (Bosses respawn 5x  faster!)") and 6 or (getgenv().CurrentMoon == "Eclipse Moon (Bosses Respawn 5x Faster and 2x modifier chance)") and 6 or 30
+        local cooldownTime = (getgenv().CurrentMoon == "Blood Moon (Bosses respawn 5x  faster!)") and 5 or (getgenv().CurrentMoon == "Eclipse Moon (Bosses Respawn 5x Faster and 2x modifier chance)") and 5 or 30
         
         local farmingActive = getgenv().TPToLowHP or autoFarmMode or autoBossMode
         
@@ -1058,6 +1058,10 @@ task.spawn(function()
                     end
                     
                     if not bossAlive and (bossWasFound or bossDeadInstance) then
+                        -- Destroy the Boss locally when detected as dead
+                        if bossObject then pcall(function() bossObject:Destroy() end) end
+                        if currentTarget and currentTarget.hrp and currentTarget.hrp.Parent then pcall(function() currentTarget.hrp.Parent:Destroy() end) end
+                        
                         getgenv().isBossFarmingActive = false; bossCooldowns[getgenv().activeBossTarget] = tick(); fireStopBossRemote()
                         getgenv().activeBossTarget = nil; currentTarget = nil; remoteFired = false
                     elseif not bossAlive and not bossWasFound then
@@ -1097,6 +1101,11 @@ task.spawn(function()
                     currentTarget.currentHealth = liveHealth
 
                     if liveHealth <= 0 then
+                        -- Destroy the targeted entity locally when health drops to 0
+                        if currentTarget and currentTarget.hrp and currentTarget.hrp.Parent then
+                            pcall(function() currentTarget.hrp.Parent:Destroy() end)
+                        end
+                        
                         if getgenv().isBossFarmingActive then getgenv().isBossFarmingActive = false; bossCooldowns[getgenv().activeBossTarget] = tick(); fireStopBossRemote(); getgenv().activeBossTarget = nil; remoteFired = false end
                         currentTarget = nil; continue 
                     end
