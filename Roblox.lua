@@ -1,11 +1,13 @@
 -- TP Lock Script (Global Vector Position + Rotation Alignment Patch)
--- Features: RS Global Scanning, Complete Modifier Filter, Strict Cooldowns, Auto Bosses, Anti-GameplayPaused, and Blacklist
+-- Features: RS Global Scanning, Complete Modifier Filter, Strict Cooldowns, Auto Bosses, Anti-GameplayPaused, Blacklist, Custom Config, Anti-AFK, Auto-Rejoin
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local CoreGui = game:GetService("CoreGui")
+local HttpService = game:GetService("HttpService")
+local VirtualUser = game:GetService("VirtualUser")
 
 local player = Players.LocalPlayer
 
@@ -17,14 +19,22 @@ local FARM_DISTANCE = -40
 
 local currentTarget = nil
 local scriptRunning = true
+
+--------------------------------------------------
+-- ANTI-AFK SYSTEM
+--------------------------------------------------
+player.Idled:Connect(function()
+    VirtualUser:CaptureController()
+    VirtualUser:ClickButton2(Vector2.new())
+end)
+
 --------------------------------------------------
 -- BLACKLIST SYSTEM (Add enemies to ignore here)
 --------------------------------------------------
 local BLACKLIST = {
     ["Golem"] = true,
-    -- Add more enemies below by copying the format:
-    -- ["Some Other Boss"] = true,
 }
+
 --------------------------------------------------
 -- GameplayPaused Remover System
 --------------------------------------------------
@@ -100,7 +110,7 @@ local function parseNumber(str)
 end
 
 --------------------------------------------------
--- MODIFIER FILTER SYSTEM (Master List)
+-- MODIFIER FILTER SYSTEM
 --------------------------------------------------
 local INLINE_MODIFIERS = {
     "Transcendental", "Sanguine", "Godlike", "Ethereal", "Spectral", 
@@ -140,7 +150,7 @@ local function getBaseName(model)
 end
 
 --------------------------------------------------
--- RS Global Scanning (Bosses & Enemies)
+-- RS Global Scanning
 --------------------------------------------------
 local function getBossesFromRS()
     local uniqueBosses = {}
@@ -164,30 +174,13 @@ local function getBossesFromRS()
     return uniqueBosses
 end
 
-local initialBossOptions = {}
-local uniqueBossData = getBossesFromRS()
-local sortedBosses = {}
-local allKnownBosses = {} 
-
-for name, hp in pairs(uniqueBossData) do 
-    table.insert(sortedBosses, {name = name, hp = hp}) 
-    allKnownBosses[name] = true
-end
-table.sort(sortedBosses, function(a, b) return a.hp < b.hp end)
-
-for _, boss in ipairs(sortedBosses) do
-    local display = string.format("(%s) %s", formatNumber(boss.hp), boss.name)
-    table.insert(initialBossOptions, display)
-end
-
 local function getAllEnemiesFromRS()
     local uniqueEnemies = {}
-    
     for _, obj in ipairs(ReplicatedStorage:GetDescendants()) do
         if obj:IsA("Model") and obj:FindFirstChildOfClass("Humanoid") then
             if BLACKLIST[obj.Name] then continue end 
             local baseName = getBaseName(obj)
-            if not string.find(obj.Name, "DamageDummy") then -- Modified: Removed boss filtering to include bosses in selection
+            if not string.find(obj.Name, "DamageDummy") then
                 local hum = obj:FindFirstChildOfClass("Humanoid")
                 local maxHP = hum.MaxHealth
                 local maxHealthObj = hum:FindFirstChild("MaxHealth")
@@ -199,12 +192,8 @@ local function getAllEnemiesFromRS()
                 end
                 
                 if maxHP and maxHP > 0 then
-                    if not uniqueEnemies[baseName] then
+                    if not uniqueEnemies[baseName] or maxHP > uniqueEnemies[baseName] then
                         uniqueEnemies[baseName] = maxHP
-                    else
-                        if maxHP > uniqueEnemies[baseName] then
-                            uniqueEnemies[baseName] = maxHP
-                        end
                     end
                 end
             end
@@ -216,6 +205,11 @@ end
 --------------------------------------------------
 -- Workspace Target Acquisition
 --------------------------------------------------
+local allKnownBosses = {} 
+local selectedEnemies = {}
+local selectedBosses = {}
+local autoFarmMode = false
+
 function getEnemies()
     local enemies = {}
     for _, obj in ipairs(workspace:GetDescendants()) do
@@ -223,7 +217,6 @@ function getEnemies()
         
         if hum and hum.Parent and hum.Parent ~= player.Character then
             local parentModel = hum.Parent
-            
             if hum:GetState() == Enum.HumanoidStateType.Dead or hum.Health <= 0 then continue end
             
             local baseEnemyName = getBaseName(parentModel)
@@ -232,7 +225,6 @@ function getEnemies()
             local isTargetable = true
             if allKnownBosses[parentModel.Name] or allKnownBosses[baseEnemyName] then
                 if not (getgenv().isBossFarmingActive and (getgenv().activeBossTarget == parentModel.Name or getgenv().activeBossTarget == baseEnemyName)) then
-                    -- Modified: Allows targeting if Auto Farm Selected mode is on and this boss is checked
                     if autoFarmMode and (selectedEnemies[parentModel.Name] or selectedEnemies[baseEnemyName]) then
                         isTargetable = true
                     else
@@ -289,9 +281,44 @@ function getEnemies()
 end
 
 --------------------------------------------------
--- Modes & Variables
+-- Pre-Initialization Element Scanners (Fixes Render Crash)
 --------------------------------------------------
-local autoFarmMode = false
+local dropdownMap = {}
+local bossDropdownMap = {}
+local bossCooldownLabels = {} 
+
+local uniqueBossData = getBossesFromRS()
+local sortedBosses = {}
+for name, hp in pairs(uniqueBossData) do 
+    table.insert(sortedBosses, {name = name, hp = hp}) 
+    allKnownBosses[name] = true
+end
+table.sort(sortedBosses, function(a, b) return a.hp < b.hp end)
+
+local initialBossOptions = {}
+for _, boss in ipairs(sortedBosses) do
+    local display = string.format("(%s) %s", formatNumber(boss.hp), boss.name)
+    table.insert(initialBossOptions, display)
+    bossDropdownMap[display] = boss.name
+end
+if #initialBossOptions == 0 then table.insert(initialBossOptions, "No Bosses Found") end
+
+local uniqueEnemies = getAllEnemiesFromRS()
+local sortedEnemies = {}
+for name, hp in pairs(uniqueEnemies) do table.insert(sortedEnemies, {name = name, hp = hp}) end
+table.sort(sortedEnemies, function(a, b) return a.hp < b.hp end)
+
+local initialEnemyOptions = {}
+for _, enemy in ipairs(sortedEnemies) do
+    local display = string.format("(%s) %s", formatNumber(enemy.hp), enemy.name)
+    table.insert(initialEnemyOptions, display)
+    dropdownMap[display] = enemy.name
+end
+if #initialEnemyOptions == 0 then table.insert(initialEnemyOptions, "No Enemies Found") end
+
+--------------------------------------------------
+-- Global Core Flags
+--------------------------------------------------
 local priorityHighToLow = true 
 local autoEquipEnabled = false
 local selectedWeapon = nil
@@ -304,20 +331,12 @@ local bossCooldowns = {}
 local bossWasFound = false
 local bossWaitTimeout = 0
 local remoteFired = false 
-
-local selectedEnemies = {}
-local dropdownMap = {}
-local selectedBosses = {}
-local bossDropdownMap = {}
-local bossCooldownLabels = {} 
-
 local changingToggles = false 
 
 --------------------------------------------------
 -- Safe Zone System
 --------------------------------------------------
 local safeZonePart = nil
-
 local function getOrCreateSafeZone()
     if not safeZonePart or not safeZonePart.Parent then
         safeZonePart = Instance.new("Part")
@@ -333,7 +352,6 @@ local function getOrCreateSafeZone()
     end
     return safeZonePart
 end
-
 getOrCreateSafeZone()
 
 --------------------------------------------------
@@ -363,7 +381,6 @@ end
 local function findBossInWorkspace(bossName)
     local wsBosses = workspace:FindFirstChild("Bosses")
     local containers = wsBosses and {wsBosses, workspace} or {workspace}
-    
     for _, container in ipairs(containers) do
         for _, child in ipairs(container:GetChildren()) do
             if child:IsA("Model") and child:FindFirstChildOfClass("Humanoid") then
@@ -377,33 +394,39 @@ local function findBossInWorkspace(bossName)
 end
 
 --------------------------------------------------
--- UI Initialization
+-- UI Instantiation Declarations
 --------------------------------------------------
+local AutoEquipToggle, WeaponDropdown, AutoEquipStatusLabel
+local TPToggle, PriorityToggle, LockDelaySlider, HPThresholdInput, StatusLabel, TargetLabel, PriorityLabel, ThresholdLabel
+local AutoFarmToggle, EnemyDropdown, AutoFarmStatusLabel, SelectedCountLabel
+local AutoBossToggle, BossDropdown, BossCooldownLabel, SelectedBossesCountLabel
+local DistanceSlider, NoclipToggle, configListDropdown, autoLoadLabel
+
 local Rayfield = loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
 
 local Window = Rayfield:CreateWindow({
     Name = "TP Lock Script",
     LoadingTitle = "Lock-on System",
     LoadingSubtitle = "RS Global Scanner Edition",
-    ConfigurationSaving = { Enabled = true, FolderName = "TPLockConfig", FileName = "Settings" },
+    ConfigurationSaving = { Enabled = false }, -- Built-in bypass
     KeySystem = false
 })
 
+-- Create all 7 tabs explicitly
 local AutoEquipTab = Window:CreateTab("Auto Equip", 4483362458)
 local MainTab = Window:CreateTab("Auto Farm All", 4483362458)
 local AutoFarmTab = Window:CreateTab("Auto Farm Selected", 4483362458)
 local AutoBossTab = Window:CreateTab("Auto Bosses", 4483362458)
 local SettingsTab = Window:CreateTab("Settings", 4483362458)
+local ConfigTab = Window:CreateTab("Config", 4483362458)
 local KeybindsTab = Window:CreateTab("Keybinds", 4483362458) 
 
-local TPToggle, AutoFarmToggle, AutoBossToggle, AutoEquipToggle
-
 --------------------------------------------------
--- Auto Equip Components
+-- Auto Equip Tab Setup
 --------------------------------------------------
-local AutoEquipStatusLabel = AutoEquipTab:CreateLabel("Auto Equip: DISABLED")
-local WeaponDropdown = AutoEquipTab:CreateDropdown({
-    Name = "Select Weapon", Options = {}, CurrentOption = {}, MultipleOptions = false, Flag = "AutoEquipSelectedWeapon",
+AutoEquipStatusLabel = AutoEquipTab:CreateLabel("Auto Equip: DISABLED")
+WeaponDropdown = AutoEquipTab:CreateDropdown({
+    Name = "Select Weapon", Options = {"Scanning..."}, CurrentOption = {"Scanning..."}, MultipleOptions = false, Flag = "AutoEquipSelectedWeapon",
     Callback = function(Option) if Option and Option[1] then selectedWeapon = Option[1] else selectedWeapon = nil end end
 })
 
@@ -412,35 +435,30 @@ local function RefreshWeapons()
     local uniqueWeapons = {}
     if player.Backpack then
         for _, item in ipairs(player.Backpack:GetChildren()) do
-            if item:IsA("Tool") and not uniqueWeapons[item.Name] then
-                uniqueWeapons[item.Name] = true
-                table.insert(options, item.Name)
-            end
+            if item:IsA("Tool") and not uniqueWeapons[item.Name] then uniqueWeapons[item.Name] = true; table.insert(options, item.Name) end
         end
     end
     if player.Character then
         for _, item in ipairs(player.Character:GetChildren()) do
-            if item:IsA("Tool") and not uniqueWeapons[item.Name] then
-                uniqueWeapons[item.Name] = true
-                table.insert(options, item.Name)
-            end
+            if item:IsA("Tool") and not uniqueWeapons[item.Name] then uniqueWeapons[item.Name] = true; table.insert(options, item.Name) end
         end
     end
-    WeaponDropdown:Refresh(options)
+    if #options == 0 then table.insert(options, "No Weapons Found") end
+    pcall(function() WeaponDropdown:Refresh(options) end)
 end
 
 AutoEquipTab:CreateButton({ Name = "Refresh Weapons", Callback = RefreshWeapons })
 AutoEquipToggle = AutoEquipTab:CreateToggle({
     Name = "Enable Auto Equip", CurrentValue = false, Flag = "AutoEquipEnabled",
-    Callback = function(Value) autoEquipEnabled = Value; AutoEquipStatusLabel:Set("Auto Equip: " .. (Value and "ENABLED" or "DISABLED")) end
+    Callback = function(Value) autoEquipEnabled = Value; pcall(function() AutoEquipStatusLabel:Set("Auto Equip: " .. (Value and "ENABLED" or "DISABLED")) end) end
 })
 
 --------------------------------------------------
--- Main Tab Components
+-- Main Tab Setup
 --------------------------------------------------
-local StatusLabel = MainTab:CreateLabel("Status: ENABLED")
-local TargetLabel = MainTab:CreateLabel("Current Target: None")
-local PriorityLabel = MainTab:CreateLabel("Priority: High HP → Low HP")
+StatusLabel = MainTab:CreateLabel("Status: ENABLED")
+TargetLabel = MainTab:CreateLabel("Current Target: None")
+PriorityLabel = MainTab:CreateLabel("Priority: High HP → Low HP")
 
 TPToggle = MainTab:CreateToggle({
     Name = "Enable TP Lock", CurrentValue = true, Flag = "TPLockEnabled",
@@ -449,54 +467,54 @@ TPToggle = MainTab:CreateToggle({
         getgenv().TPToLowHP = Value
         if Value then
             changingToggles = true
-            if AutoFarmToggle then AutoFarmToggle:Set(false) end
+            if AutoFarmToggle then pcall(function() AutoFarmToggle:Set(false) end) end
             changingToggles = false
             autoFarmMode = false
         else
             currentTarget = nil
         end
-        StatusLabel:Set("Status: " .. (Value and "ENABLED" or "DISABLED"))
+        pcall(function() StatusLabel:Set("Status: " .. (Value and "ENABLED" or "DISABLED")) end)
     end
 })
 
-MainTab:CreateToggle({
+PriorityToggle = MainTab:CreateToggle({
     Name = "Target Sorting: High HP First", CurrentValue = priorityHighToLow, Flag = "PriorityHighHP",
     Callback = function(Value)
         priorityHighToLow = Value
-        PriorityLabel:Set(Value and "Priority: High HP → Low HP" or "Priority: Low HP → High HP")
+        pcall(function() PriorityLabel:Set(Value and "Priority: High HP → Low HP" or "Priority: Low HP → High HP") end)
         currentTarget = nil
     end
 })
 
-MainTab:CreateSlider({
+LockDelaySlider = MainTab:CreateSlider({
     Name = "Lock Delay", Range = {0.001, 0.1}, Increment = 0.001, CurrentValue = LOCK_DELAY, Suffix = "s", Flag = "LockDelayValue", 
     Callback = function(Value) LOCK_DELAY = Value end
 })
 
-local ThresholdLabel = MainTab:CreateLabel("Current Threshold: " .. formatNumber(MAX_HP_THRESHOLD))
-MainTab:CreateInput({
+ThresholdLabel = MainTab:CreateLabel("Current Threshold: " .. formatNumber(MAX_HP_THRESHOLD))
+HPThresholdInput = MainTab:CreateInput({
     Name = "Max HP Threshold (For Non-Selected)", PlaceholderText = "1QA / 500T / 5B", Flag = "HPThresholdValue",
     Callback = function(Text)
         local num = parseNumber(Text)
-        if num then MAX_HP_THRESHOLD = num; ThresholdLabel:Set("Current Threshold: " .. formatNumber(MAX_HP_THRESHOLD)) end
+        if num then MAX_HP_THRESHOLD = num; pcall(function() ThresholdLabel:Set("Current Threshold: " .. formatNumber(MAX_HP_THRESHOLD)) end) end
     end
 })
 
 --------------------------------------------------
--- Auto Farm Selected Components
+-- Auto Farm Selected Tab Setup
 --------------------------------------------------
-local AutoFarmStatusLabel = AutoFarmTab:CreateLabel("Auto Farm: DISABLED")
-local SelectedCountLabel = AutoFarmTab:CreateLabel("Selected Enemies: 0")
+AutoFarmStatusLabel = AutoFarmTab:CreateLabel("Auto Farm: DISABLED")
+SelectedCountLabel = AutoFarmTab:CreateLabel("Selected Enemies: 0")
 
-local EnemyDropdown = AutoFarmTab:CreateDropdown({
-    Name = "Select Enemies & Bosses", Options = {}, CurrentOption = {}, MultipleOptions = true, Flag = "SelectedEnemiesList",
+EnemyDropdown = AutoFarmTab:CreateDropdown({
+    Name = "Select Enemies & Bosses", Options = initialEnemyOptions, CurrentOption = {}, MultipleOptions = true, Flag = "SelectedEnemiesList",
     Callback = function(Options)
         selectedEnemies = {}
         for _, displayName in ipairs(Options) do
             local realName = dropdownMap[displayName]
             if realName then selectedEnemies[realName] = true end
         end
-        SelectedCountLabel:Set("Selected Enemies: " .. tostring(#Options))
+        pcall(function() SelectedCountLabel:Set("Selected Enemies: " .. tostring(#Options)) end)
     end
 })
 
@@ -507,28 +525,24 @@ AutoFarmToggle = AutoFarmTab:CreateToggle({
         autoFarmMode = Value
         if Value then
             changingToggles = true
-            if TPToggle then TPToggle:Set(false) end
+            if TPToggle then pcall(function() TPToggle:Set(false) end) end
             changingToggles = false
             getgenv().TPToLowHP = false
         else
             currentTarget = nil
         end
-        AutoFarmStatusLabel:Set("Auto Farm: " .. (Value and "ENABLED" or "DISABLED"))
+        pcall(function() AutoFarmStatusLabel:Set("Auto Farm: " .. (Value and "ENABLED" or "DISABLED")) end)
     end
 })
 
 local function RefreshEnemyDropdown()
-    local uniqueEnemies = getAllEnemiesFromRS()
+    local uniqueEnemiesList = getAllEnemiesFromRS()
     for _, enemy in ipairs(getEnemies()) do
-        if not uniqueEnemies[enemy.name] then
-            uniqueEnemies[enemy.name] = enemy.maxHealthValue
-        end
+        if not uniqueEnemiesList[enemy.name] then uniqueEnemiesList[enemy.name] = enemy.maxHealthValue end
     end
-
     local sorted = {}
-    for name, hp in pairs(uniqueEnemies) do table.insert(sorted, {name = name, hp = hp}) end
+    for name, hp in pairs(uniqueEnemiesList) do table.insert(sorted, {name = name, hp = hp}) end
     table.sort(sorted, function(a, b) return a.hp < b.hp end)
-
     local options = {}
     dropdownMap = {}
     for _, enemy in ipairs(sorted) do
@@ -536,28 +550,28 @@ local function RefreshEnemyDropdown()
         table.insert(options, display)
         dropdownMap[display] = enemy.name
     end
-    EnemyDropdown:Refresh(options)
+    if #options == 0 then table.insert(options, "No Enemies Found") end
+    pcall(function() EnemyDropdown:Refresh(options) end)
 end
 
 AutoFarmTab:CreateButton({ Name = "Refresh Enemy List", Callback = RefreshEnemyDropdown })
-
 AutoFarmTab:CreateButton({
     Name = "Reset Selection",
     Callback = function()
         selectedEnemies = {}
-        EnemyDropdown:Set({})
-        SelectedCountLabel:Set("Selected Enemies: 0")
+        pcall(function() EnemyDropdown:Set({}) end)
+        pcall(function() SelectedCountLabel:Set("Selected Enemies: 0") end)
         if not getgenv().isBossFarmingActive then currentTarget = nil end
     end
 })
 
 --------------------------------------------------
--- Auto Bosses Components
+-- Auto Bosses Tab Setup
 --------------------------------------------------
-local BossCooldownLabel = AutoBossTab:CreateLabel("Auto Bosses: DISABLED")
-local SelectedBossesCountLabel = AutoBossTab:CreateLabel("Selected Bosses: 0")
+BossCooldownLabel = AutoBossTab:CreateLabel("Auto Bosses: DISABLED")
+SelectedBossesCountLabel = AutoBossTab:CreateLabel("Selected Bosses: 0")
 
-local BossDropdown = AutoBossTab:CreateDropdown({
+BossDropdown = AutoBossTab:CreateDropdown({
     Name = "Select Bosses", Options = initialBossOptions, CurrentOption = {}, MultipleOptions = true, Flag = "SelectedBossesList_V3", 
     Callback = function(Options)
         selectedBosses = {}
@@ -565,14 +579,9 @@ local BossDropdown = AutoBossTab:CreateDropdown({
             local realName = bossDropdownMap[displayName]
             if realName then selectedBosses[realName] = true end
         end
-        SelectedBossesCountLabel:Set("Selected Bosses: " .. tostring(#Options))
+        pcall(function() SelectedBossesCountLabel:Set("Selected Bosses: " .. tostring(#Options)) end)
     end
 })
-
-for _, opt in ipairs(initialBossOptions) do
-    local extName = string.match(opt, "%(.*%) (.*)")
-    if extName then bossDropdownMap[opt] = extName end
-end
 
 AutoBossToggle = AutoBossTab:CreateToggle({
     Name = "Enable Auto Bosses", CurrentValue = false, Flag = "AutoBossEnabled_V3", 
@@ -585,12 +594,12 @@ AutoBossToggle = AutoBossTab:CreateToggle({
                 currentTarget = nil
                 remoteFired = false
             end
-            BossCooldownLabel:Set("Auto Bosses: DISABLED")
+            pcall(function() BossCooldownLabel:Set("Auto Bosses: DISABLED") end)
         end
     end
 })
 
-AutoBossTab:CreateButton({ Name = "Reset Boss Selection", Callback = function() selectedBosses = {}; BossDropdown:Set({}); SelectedBossesCountLabel:Set("Selected Bosses: 0") end })
+AutoBossTab:CreateButton({ Name = "Reset Boss Selection", Callback = function() selectedBosses = {}; pcall(function() BossDropdown:Set({}) end); pcall(function() SelectedBossesCountLabel:Set("Selected Bosses: 0") end) end })
 
 AutoBossTab:CreateLabel("— Live Boss Spawn Timers —")
 for _, boss in ipairs(sortedBosses) do
@@ -598,17 +607,17 @@ for _, boss in ipairs(sortedBosses) do
 end
 
 --------------------------------------------------
--- Settings & Keybinds
+-- Settings Tab Setup
 --------------------------------------------------
 local noclipEnabled = false
 local noclipConnection = nil
 
-SettingsTab:CreateSlider({
+DistanceSlider = SettingsTab:CreateSlider({
     Name = "Target Distance Offset (Y-Axis)", Range = {-50, 50}, Increment = 1, CurrentValue = FARM_DISTANCE, Suffix = " studs",
     Flag = "FarmDistanceOffset", Callback = function(Value) FARM_DISTANCE = Value end
 })
 
-SettingsTab:CreateToggle({
+NoclipToggle = SettingsTab:CreateToggle({
     Name = "Noclip", CurrentValue = false, Flag = "NoclipEnabled",
     Callback = function(Value)
         noclipEnabled = Value
@@ -637,12 +646,141 @@ SettingsTab:CreateButton({
     end
 })
 
-KeybindsTab:CreateKeybind({ Name = "Toggle TP Lock", CurrentKeybind = "B", HoldToInteract = false, Flag = "KB_TPLock", Callback = function() TPToggle:Set(not getgenv().TPToLowHP) end })
-KeybindsTab:CreateKeybind({ Name = "Toggle Auto Farm", CurrentKeybind = "V", HoldToInteract = false, Flag = "KB_AutoFarm", Callback = function() AutoFarmToggle:Set(not autoFarmMode) end })
-KeybindsTab:CreateKeybind({ Name = "Toggle Auto Bosses", CurrentKeybind = "C", HoldToInteract = false, Flag = "KB_AutoBoss", Callback = function() AutoBossToggle:Set(not autoBossMode) end })
+--------------------------------------------------
+-- Custom Config System Setup
+--------------------------------------------------
+local CONFIG_FOLDER = "TPLockConfigs"
+if not isfolder(CONFIG_FOLDER) then makefolder(CONFIG_FOLDER) end
+
+local targetConfigName = "Default"
+
+local function getSavedConfigs()
+    local configs = {}
+    for _, file in ipairs(listfiles(CONFIG_FOLDER)) do
+        if file:sub(-5) == ".json" then
+            local name = file:match("([^/\\]+)%.json$")
+            if name then table.insert(configs, name) end
+        end
+    end
+    return configs
+end
+
+local function saveCustomConfig(name)
+    if name == "" or name == "No Configs Found" then return end
+    local data = {
+        AutoEquipEnabled = autoEquipEnabled,
+        SelectedWeapon = selectedWeapon,
+        TPLockEnabled = getgenv().TPToLowHP,
+        PriorityHighHP = priorityHighToLow,
+        LockDelayValue = LOCK_DELAY,
+        HPThresholdValue = MAX_HP_THRESHOLD,
+        SelectedEnemiesList = selectedEnemies,
+        AutoFarmSelectedEnabled = autoFarmMode,
+        SelectedBossesList = selectedBosses,
+        AutoBossEnabled = autoBossMode,
+        FarmDistanceOffset = FARM_DISTANCE,
+        NoclipEnabled = noclipEnabled
+    }
+    writefile(CONFIG_FOLDER .. "/" .. name .. ".json", HttpService:JSONEncode(data))
+    Rayfield:Notify({Title = "Config Saved", Content = "Successfully saved config: " .. name, Duration = 3})
+    local updated = getSavedConfigs()
+    if #updated == 0 then table.insert(updated, "No Configs Found") end
+    if configListDropdown then pcall(function() configListDropdown:Refresh(updated) end) end
+end
+
+local function loadCustomConfig(name)
+    if name == "" or name == "No Configs Found" then return end
+    local path = CONFIG_FOLDER .. "/" .. name .. ".json"
+    if isfile(path) then
+        local success, rawData = pcall(function() return readfile(path) end)
+        if success then
+            local parsed = HttpService:JSONDecode(rawData)
+            changingToggles = true
+            
+            pcall(function()
+                if parsed.AutoEquipEnabled ~= nil then autoEquipEnabled = parsed.AutoEquipEnabled; if AutoEquipToggle then AutoEquipToggle:Set(parsed.AutoEquipEnabled) end end
+                if parsed.SelectedWeapon ~= nil then selectedWeapon = parsed.SelectedWeapon; if WeaponDropdown then WeaponDropdown:Set({parsed.SelectedWeapon}) end end
+                if parsed.TPLockEnabled ~= nil then getgenv().TPToLowHP = parsed.TPLockEnabled; if TPToggle then TPToggle:Set(parsed.TPLockEnabled) end end
+                if parsed.PriorityHighHP ~= nil then priorityHighToLow = parsed.PriorityHighHP; if PriorityToggle then PriorityToggle:Set(parsed.PriorityHighHP) end end
+                if parsed.LockDelayValue ~= nil then LOCK_DELAY = parsed.LockDelayValue; if LockDelaySlider then LockDelaySlider:Set(parsed.LockDelayValue) end end
+                if parsed.HPThresholdValue ~= nil then MAX_HP_THRESHOLD = parsed.HPThresholdValue; if ThresholdLabel then ThresholdLabel:Set("Current Threshold: " .. formatNumber(MAX_HP_THRESHOLD)) end end
+                if parsed.FarmDistanceOffset ~= nil then FARM_DISTANCE = parsed.FarmDistanceOffset; if DistanceSlider then DistanceSlider:Set(parsed.FarmDistanceOffset) end end
+                if parsed.NoclipEnabled ~= nil then noclipEnabled = parsed.NoclipEnabled; if NoclipToggle then NoclipToggle:Set(parsed.NoclipEnabled) end end
+                if parsed.AutoFarmSelectedEnabled ~= nil then autoFarmMode = parsed.AutoFarmSelectedEnabled; if AutoFarmToggle then AutoFarmToggle:Set(parsed.AutoFarmSelectedEnabled) end end
+                if parsed.AutoBossEnabled ~= nil then autoBossMode = parsed.AutoBossEnabled; if AutoBossToggle then AutoBossToggle:Set(parsed.AutoBossEnabled) end end
+                
+                if parsed.SelectedEnemiesList then
+                    selectedEnemies = parsed.SelectedEnemiesList
+                    local displays = {}
+                    for d, r in pairs(dropdownMap) do if selectedEnemies[r] then table.insert(displays, d) end end
+                    if EnemyDropdown then EnemyDropdown:Set(displays) end
+                end
+
+                if parsed.SelectedBossesList then
+                    selectedBosses = parsed.SelectedBossesList
+                    local displays = {}
+                    for d, r in pairs(bossDropdownMap) do if selectedBosses[r] then table.insert(displays, d) end end
+                    if BossDropdown then BossDropdown:Set(displays) end
+                end
+            end)
+            
+            changingToggles = false
+            Rayfield:Notify({Title = "Config Loaded", Content = "Successfully loaded config: " .. name, Duration = 3})
+        end
+    end
+end
+
+ConfigTab:CreateInput({
+    Name = "Config Name", PlaceholderText = "Enter Config Name",
+    Callback = function(Text) if Text and Text ~= "" then targetConfigName = Text end end
+})
+
+ConfigTab:CreateButton({ Name = "Save Config", Callback = function() saveCustomConfig(targetConfigName) end })
+
+local initialConfigsList = getSavedConfigs()
+if #initialConfigsList == 0 then table.insert(initialConfigsList, "No Configs Found") end
+
+configListDropdown = ConfigTab:CreateDropdown({
+    Name = "Saved Configurations", Options = initialConfigsList, CurrentOption = initialConfigsList[1], MultipleOptions = false,
+    Callback = function(Option) if Option and Option[1] and Option[1] ~= "No Configs Found" then targetConfigName = Option[1] end end
+})
+
+ConfigTab:CreateButton({ Name = "Load Selected Config", Callback = function() loadCustomConfig(targetConfigName) end })
+
+autoLoadLabel = ConfigTab:CreateLabel("Current Auto-Load: None")
+ConfigTab:CreateButton({
+    Name = "Set As Auto-Load",
+    Callback = function()
+        if targetConfigName ~= "" and targetConfigName ~= "No Configs Found" then
+            writefile(CONFIG_FOLDER .. "/autoload.txt", targetConfigName)
+            pcall(function() autoLoadLabel:Set("Current Auto-Load: " .. targetConfigName) end)
+            Rayfield:Notify({Title = "Auto-Load Set", Content = targetConfigName .. " will now load automatically.", Duration = 3})
+        end
+    end
+})
+
+
+local queueteleport = queue_on_teleport
+if queueteleport then
+    player.OnTeleport:Connect(function(State)
+        if State == Enum.TeleportState.Started then
+            local code = loadstring(game:HttpGet("https://raw.githubusercontent.com/ModAmiginhos/Roblox3/refs/heads/main/Roblox.lua"))()
+            if code and code ~= "" then pcall(function() queueteleport(code) end) end
+        end
+    end)
+else
+    ConfigTab:CreateLabel("⚠️ Executor doesn't support QueueOnTeleport")
+end
 
 --------------------------------------------------
--- Validation and Targeting
+-- Keybinds Tab Setup
+--------------------------------------------------
+KeybindsTab:CreateKeybind({ Name = "Toggle TP Lock", CurrentKeybind = "B", HoldToInteract = false, Flag = "KB_TPLock", Callback = function() if TPToggle then TPToggle:Set(not getgenv().TPToLowHP) end end })
+KeybindsTab:CreateKeybind({ Name = "Toggle Auto Farm", CurrentKeybind = "V", HoldToInteract = false, Flag = "KB_AutoFarm", Callback = function() if AutoFarmToggle then AutoFarmToggle:Set(not autoFarmMode) end end })
+KeybindsTab:CreateKeybind({ Name = "Toggle Auto Bosses", CurrentKeybind = "C", HoldToInteract = false, Flag = "KB_AutoBoss", Callback = function() if AutoBossToggle then AutoBossToggle:Set(not autoBossMode) end end })
+
+--------------------------------------------------
+-- Validation & Targeting System
 --------------------------------------------------
 local function isValidTarget(enemy)
     if not enemy or not enemy.hrp or not enemy.hrp.Parent then return false end
@@ -653,14 +791,10 @@ local function isValidTarget(enemy)
     local liveHealth = enemy.humanoid.Health
     local bossHealthObj = enemy.humanoid:FindFirstChild("BossHealth")
     if bossHealthObj and bossHealthObj:IsA("NumberValue") then liveHealth = bossHealthObj.Value end
-    
     if liveHealth <= 0 then return false end
 
-    if autoFarmMode then
-        return selectedEnemies[enemy.name] == true or selectedEnemies[enemy.realName] == true
-    else
-        return enemy.maxHealthValue < MAX_HP_THRESHOLD
-    end
+    if autoFarmMode then return selectedEnemies[enemy.name] == true or selectedEnemies[enemy.realName] == true
+    else return enemy.maxHealthValue < MAX_HP_THRESHOLD end
 end
 
 local function findNewTarget()
@@ -670,25 +804,19 @@ local function findNewTarget()
 
     for _, enemy in ipairs(enemies) do
         local valid = false
-        if autoFarmMode then
-            valid = (selectedEnemies[enemy.name] == true or selectedEnemies[enemy.realName] == true)
-        elseif getgenv().TPToLowHP then
-            valid = (enemy.maxHealthValue < MAX_HP_THRESHOLD)
-        end
+        if autoFarmMode then valid = (selectedEnemies[enemy.name] == true or selectedEnemies[enemy.realName] == true)
+        elseif getgenv().TPToLowHP then valid = (enemy.maxHealthValue < MAX_HP_THRESHOLD) end
 
         if valid then
-            if priorityHighToLow then
-                if enemy.maxHealthValue > bestHP then bestHP = enemy.maxHealthValue; bestTarget = enemy end
-            else
-                if enemy.maxHealthValue < bestHP then bestHP = enemy.maxHealthValue; bestTarget = enemy end
-            end
+            if priorityHighToLow then if enemy.maxHealthValue > bestHP then bestHP = enemy.maxHealthValue; bestTarget = enemy end
+            else if enemy.maxHealthValue < bestHP then bestHP = enemy.maxHealthValue; bestTarget = enemy end end
         end
     end
     return bestTarget
 end
 
 --------------------------------------------------
--- Script Threads
+-- Core Loop Workers
 --------------------------------------------------
 task.spawn(function()
     while scriptRunning do
@@ -714,29 +842,23 @@ task.spawn(function()
         for bossName, label in pairs(bossCooldownLabels) do
             local lastKill = bossCooldowns[bossName] or 0
             local remaining = math.max(0, 30 - (tick() - lastKill))
-            if remaining > 0 then label:Set(string.format("%s: Cooldown (%.1fs)", bossName, remaining)) else label:Set(bossName .. ": Ready") end
+            if label then if remaining > 0 then label:Set(string.format("%s: Cooldown (%.1fs)", bossName, remaining)) else label:Set(bossName .. ": Ready") end end
         end
 
-        if autoBossMode then
-            if getgenv().isBossFarmingActive then
-                BossCooldownLabel:Set("Farming Boss: " .. tostring(getgenv().activeBossTarget))
+        if autoBossMode and BossCooldownLabel then
+            if getgenv().isBossFarmingActive then BossCooldownLabel:Set("Farming Boss: " .. tostring(getgenv().activeBossTarget))
             else
                 local lowestCooldown = math.huge
                 local nextBossReadyName = nil
                 local anySelected = false
-                
                 for bossName, _ in pairs(selectedBosses) do
                     anySelected = true
                     local lastKill = bossCooldowns[bossName] or 0
                     local remaining = math.max(0, 30 - (tick() - lastKill))
                     if remaining < lowestCooldown then lowestCooldown = remaining; nextBossReadyName = bossName end
                 end
-                
-                if not anySelected then
-                    BossCooldownLabel:Set("Auto Bosses: Select a Boss!")
-                elseif nextBossReadyName then
-                    if lowestCooldown == 0 then BossCooldownLabel:Set("Next Boss: Ready!") else BossCooldownLabel:Set(string.format("Next Boss (%s) in: %.1fs", nextBossReadyName, lowestCooldown)) end
-                end
+                if not anySelected then BossCooldownLabel:Set("Auto Bosses: Select a Boss!")
+                elseif nextBossReadyName then if lowestCooldown == 0 then BossCooldownLabel:Set("Next Boss: Ready!") else BossCooldownLabel:Set(string.format("Next Boss (%s) in: %.1fs", nextBossReadyName, lowestCooldown)) end end
             end
         end
 
@@ -746,7 +868,6 @@ task.spawn(function()
             local humanoid = character and character:FindFirstChildOfClass("Humanoid")
 
             if root and humanoid then
-                
                 if autoBossMode and not getgenv().isBossFarmingActive then
                     local bossToSpawn = nil
                     for bossName, _ in pairs(selectedBosses) do
@@ -755,15 +876,13 @@ task.spawn(function()
                     end
                     if bossToSpawn then
                         getgenv().isBossFarmingActive = true; bossWasFound = false; getgenv().activeBossTarget = bossToSpawn
-                        bossWaitTimeout = tick(); remoteFired = false ; currentTarget = nil 
+                        bossWaitTimeout = tick(); remoteFired = false; currentTarget = nil 
                     end
                 end
 
                 if getgenv().isBossFarmingActive then
                     if not remoteFired then fireStartBossRemote(getgenv().activeBossTarget); remoteFired = true end
-
                     local bossObject = findBossInWorkspace(getgenv().activeBossTarget)
-                    
                     local bossAlive = false
                     local bossDeadInstance = false
 
@@ -796,9 +915,7 @@ task.spawn(function()
                         if not currentTarget or (currentTarget.name ~= getgenv().activeBossTarget and currentTarget.realName ~= getgenv().activeBossTarget) or not currentTarget.hrp or not currentTarget.hrp.Parent then
                             currentTarget = nil
                             for _, enemy in ipairs(getEnemies()) do
-                                if enemy.name == getgenv().activeBossTarget or enemy.realName == getgenv().activeBossTarget then
-                                    currentTarget = enemy; break
-                                end
+                                if enemy.name == getgenv().activeBossTarget or enemy.realName == getgenv().activeBossTarget then currentTarget = enemy; break end
                             end
                         end
                     end
@@ -817,7 +934,6 @@ task.spawn(function()
                     humanoid:ChangeState(Enum.HumanoidStateType.Physics)
                     root.Velocity = Vector3.new(0, 0, 0)
                     root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-                    
                     root.CFrame = CFrame.new(enemyPos.X, enemyPos.Y + FARM_DISTANCE, enemyPos.Z, R00, R01, R02, R10, R11, R12, R20, R21, R22)
                     
                     local liveHealth = 0
@@ -826,29 +942,17 @@ task.spawn(function()
                     currentTarget.currentHealth = liveHealth
 
                     if liveHealth <= 0 then
-                        if getgenv().isBossFarmingActive then
-                            getgenv().isBossFarmingActive = false
-                            bossCooldowns[getgenv().activeBossTarget] = tick()
-                            fireStopBossRemote() 
-                            getgenv().activeBossTarget = nil
-                            remoteFired = false
-                        end
-                        currentTarget = nil
-                        continue 
+                        if getgenv().isBossFarmingActive then getgenv().isBossFarmingActive = false; bossCooldowns[getgenv().activeBossTarget] = tick(); fireStopBossRemote(); getgenv().activeBossTarget = nil; remoteFired = false end
+                        currentTarget = nil; continue 
                     end
 
-                    local statusPrefix = getgenv().isBossFarmingActive and "[BOSS ACTIVE]" or "Target:"
-                    TargetLabel:Set(string.format(
-                        "%s %s | HP: %s/%s",
-                        statusPrefix,
-                        currentTarget.realName or currentTarget.name,
-                        formatNumber(currentTarget.currentHealth),
-                        formatNumber(currentTarget.maxHealthValue)
-                    ))
-                    
+                    if TargetLabel then
+                        local statusPrefix = getgenv().isBossFarmingActive and "[BOSS ACTIVE]" or "Target:"
+                        pcall(function() TargetLabel:Set(string.format("%s %s | HP: %s/%s", statusPrefix, currentTarget.realName or currentTarget.name, formatNumber(currentTarget.currentHealth), formatNumber(currentTarget.maxHealthValue))) end)
+                    end
                     task.wait(LOCK_DELAY)
                 else
-                    TargetLabel:Set("Current Target: Searching (Safe Zone)")
+                    if TargetLabel then pcall(function() TargetLabel:Set("Current Target: Searching (Safe Zone)") end) end
                     local zone = getOrCreateSafeZone()
                     root.CFrame = zone.CFrame + Vector3.new(0, 10, 0)
                     humanoid:ChangeState(Enum.HumanoidStateType.RunningNoPhysics)
@@ -862,6 +966,16 @@ task.spawn(function()
     end
 end)
 
--- Pre-Load the UI upon injection
-RefreshWeapons()
-RefreshEnemyDropdown()
+-- Delayed Post-Rendering Actions (Bypasses rendering bottlenecks)
+task.defer(function()
+    pcall(RefreshWeapons)
+    pcall(RefreshEnemyDropdown)
+    
+    if isfile(CONFIG_FOLDER .. "/autoload.txt") then
+        local autoLoadName = readfile(CONFIG_FOLDER .. "/autoload.txt")
+        if autoLoadName and autoLoadName ~= "" and isfile(CONFIG_FOLDER .. "/" .. autoLoadName .. ".json") then
+            if autoLoadLabel then pcall(function() autoLoadLabel:Set("Current Auto-Load: " .. autoLoadName) end) end
+            pcall(function() loadCustomConfig(autoLoadName) end)
+        end
+    end
+end)
